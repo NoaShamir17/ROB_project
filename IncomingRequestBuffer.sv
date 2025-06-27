@@ -1,21 +1,24 @@
 `include "fifo.sv"
 `include "ar_if.sv"
 
-module OutcomingRequestBuffer #(
-    parameter ID_WIDTH = 4,
+module IncomingRequestBuffer #(
+    parameter ID_WIDTH   = 4,
     parameter ADDR_WIDTH = 32,
-    parameter LEN_WIDTH = 8,
-    parameter TAG_WIDTH = 4,
+    parameter LEN_WIDTH  = 8,
+    parameter TAG_WIDTH  = 4,
     parameter FIFO_DEPTH = 16
 )(
-    input  logic clk,               // Clock signal
-    input  logic rst,               // Reset signal
+    input  logic clk,
+    input  logic rst,
 
-    ar_if.slave in_if,          // Input interface from ROB (AXI master)
-    ar_if.master out_if         // Output interface to AXI slave
+    // Interface from AXI master (external)
+    ar_if.slave  in_if,
+
+    // Interface to internal ID Remapping unit
+    ar_if.master out_if
 );
 
-    // Define a bundled struct for AXI Read requests (to be sent in FIFO) - maybe should be changed in the future
+    // Define a struct to bundle the read request fields
     typedef struct packed {
         logic [ID_WIDTH-1:0]   id;
         logic [ADDR_WIDTH-1:0] addr;
@@ -26,12 +29,12 @@ module OutcomingRequestBuffer #(
         logic [TAG_WIDTH-1:0]  tagid;
     } ar_req_t;
 
-    // Internal variables: request going into FIFO, request coming out of FIFO
+    // Internal wires to connect to FIFO
     ar_req_t fifo_in, fifo_out;
-    logic fifo_empty, fifo_full;
+    logic fifo_full, fifo_empty;
     logic push_req, pop_req;
 
-    // Aggregate incoming signals from in_if into a struct
+    // Aggregate inputs from in_if into the FIFO input struct
     assign fifo_in = '{
         id:    in_if.id,
         addr:  in_if.addr,
@@ -42,18 +45,16 @@ module OutcomingRequestBuffer #(
         tagid: in_if.tagid
     };
 
-    // Push only if input is valid and FIFO has room
+    // Push when valid and FIFO not full
     assign push_req = in_if.valid && !fifo_full;
-
-    // Pop only if FIFO is not empty AND output interface is not asserting valid AND ready
-    assign pop_req  = !fifo_empty && !out_if.valid && out_if.ready;
-
-    // Tell the master it can send more requests
     assign in_if.ready = !fifo_full;
 
-    // Instantiate FIFO with struct width
+    // Pop when FIFO not empty and downstream module is ready
+    assign pop_req = !fifo_empty && !out_if.valid;
+
+    // Instantiate FIFO
     fifo #(
-        .DATA_WIDTH($bits(ar_req_t)),  // Pass struct width as a flat integer
+        .DATA_WIDTH($bits(ar_req_t)),
         .DEPTH(FIFO_DEPTH)
     ) fifo_inst (
         .clk(clk),
@@ -66,13 +67,11 @@ module OutcomingRequestBuffer #(
         .full(fifo_full)
     );
 
-    // output logic
+    // Drive output to the ID Remapping unit
     always_ff @(posedge clk or posedge rst) begin
         if (rst) begin
-            // Reset output valid
             out_if.valid <= 0;
         end else if (pop_req) begin
-            // Send out a request from FIFO
             out_if.valid <= 1;
             out_if.id    <= fifo_out.id;
             out_if.addr  <= fifo_out.addr;
@@ -82,7 +81,6 @@ module OutcomingRequestBuffer #(
             out_if.qos   <= fifo_out.qos;
             out_if.tagid <= fifo_out.tagid;
         end else if (out_if.ready) begin
-            // Once accepted, drop valid
             out_if.valid <= 0;
         end
     end
