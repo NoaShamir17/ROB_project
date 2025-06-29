@@ -2,36 +2,36 @@
 `include "ar_if.sv"
 
 module OutcomingRequestBuffer #(
-    parameter ID_WIDTH = 4,
-    parameter ADDR_WIDTH = 32,
-    parameter LEN_WIDTH = 8,
-    parameter TAG_WIDTH = 4,
-    parameter FIFO_DEPTH = 16
+    parameter ID_WIDTH    = 4,    // AXI ID width
+    parameter ADDR_WIDTH  = 32,   // Memory address width
+    parameter LEN_WIDTH   = 8,    // Burst length width
+    parameter TAG_WIDTH   = 4,    // Internal tag width
+    parameter FIFO_DEPTH  = 16    // FIFO depth for buffering outgoing AR requests
 )(
-    input  logic clk,               // Clock signal
-    input  logic rst,               // Reset signal
+    input  logic clk,             // Clock
+    input  logic rst,             // Synchronous reset (active high)
 
-    ar_if.slave in_if,          // Input interface from ROB (AXI master)
-    ar_if.master out_if         // Output interface to AXI slave
+    ar_if.receiver in_if,         // Input from internal logic (ROB, remapper, etc.)
+    ar_if.sender   out_if         // Output to AXI slave (external)
 );
 
-    // Define a bundled struct for AXI Read requests (to be sent in FIFO) - maybe should be changed in the future
+    // Struct for bundling an AXI Read request into FIFO
     typedef struct packed {
-        logic [ID_WIDTH-1:0]   id;
-        logic [ADDR_WIDTH-1:0] addr;
-        logic [LEN_WIDTH-1:0]  len;
-        logic [2:0]            size;
-        logic [1:0]            burst;
-        logic [3:0]            qos;
-        logic [TAG_WIDTH-1:0]  tagid;
+        logic [ID_WIDTH-1:0]   id;     // AXI transaction ID
+        logic [ADDR_WIDTH-1:0] addr;   // Memory address
+        logic [LEN_WIDTH-1:0]  len;    // Burst length
+        logic [2:0]            size;   // Beat size
+        logic [1:0]            burst;  // Burst type (INCR, FIXED, etc.)
+        logic [3:0]            qos;    // Quality of service
+        logic [TAG_WIDTH-1:0]  tagid;  // Internal tag for tracking
     } ar_req_t;
 
-    // Internal variables: request going into FIFO, request coming out of FIFO
-    ar_req_t fifo_in, fifo_out;
-    logic fifo_empty, fifo_full;
-    logic push_req, pop_req;
+    // Internal FIFO wiring
+    ar_req_t fifo_in, fifo_out;        // FIFO input/output data
+    logic fifo_full, fifo_empty;       // FIFO status
+    logic push_req, pop_req;           // Control signals
 
-    // Aggregate incoming signals from in_if into a struct
+    // Group incoming signals into FIFO struct
     assign fifo_in = '{
         id:    in_if.id,
         addr:  in_if.addr,
@@ -42,37 +42,38 @@ module OutcomingRequestBuffer #(
         tagid: in_if.tagid
     };
 
-    // Push only if input is valid and FIFO has room
+    // Push: when internal logic sends a valid transaction and FIFO has space
     assign push_req = in_if.valid && !fifo_full;
 
-    // Pop only if FIFO is not empty AND output interface is not asserting valid AND ready
-    assign pop_req  = !fifo_empty && !out_if.valid && out_if.ready;
+    // Pop: when FIFO has data and output is allowed to send
+    assign pop_req = !fifo_empty && (!out_if.valid || out_if.ready);
 
-    // Tell the master it can send more requests
+    // Tell internal logic it can send a request
     assign in_if.ready = !fifo_full;
 
-    // Instantiate FIFO with struct width
+    // FIFO instantiation for buffering outgoing requests
     fifo #(
-        .DATA_WIDTH($bits(ar_req_t)),  // Pass struct width as a flat integer
+        .DATA_WIDTH($bits(ar_req_t)),  // Total width of packed request
         .DEPTH(FIFO_DEPTH)
     ) fifo_inst (
         .clk(clk),
         .rst(rst),
-        .wr_en(push_req),
-        .rd_en(pop_req),
+        .wr_en(push_req),              // Push from internal logic
+        .rd_en(pop_req),               // Pop to external AXI slave
         .din(fifo_in),
         .dout(fifo_out),
         .empty(fifo_empty),
         .full(fifo_full)
     );
 
-    // output logic
+    // Output request logic
     always_ff @(posedge clk or posedge rst) begin
         if (rst) begin
-            // Reset output valid
+            // Clear valid on reset
             out_if.valid <= 0;
-        end else if (pop_req) begin
-            // Send out a request from FIFO
+        end
+        else if (pop_req) begin
+            // Drive new request from FIFO to AXI slave
             out_if.valid <= 1;
             out_if.id    <= fifo_out.id;
             out_if.addr  <= fifo_out.addr;
@@ -81,8 +82,9 @@ module OutcomingRequestBuffer #(
             out_if.burst <= fifo_out.burst;
             out_if.qos   <= fifo_out.qos;
             out_if.tagid <= fifo_out.tagid;
-        end else if (out_if.ready) begin
-            // Once accepted, drop valid
+        end
+        else if (out_if.ready && out_if.valid) begin
+            // After successful transmission, drop valid
             out_if.valid <= 0;
         end
     end
