@@ -22,9 +22,8 @@ module row_col_assign #(
     // **** NOTE: There is a SYNTAX ISSUE here in the original code: ****
     // You are missing a comma after 'out_id' and a semicolon after 'unique_id' in the port list.
     // Do not fix now per your request — just be aware it won’t compile until you add them.
-    output logic [ID_WIDTH-1:0] out_id
-    output logic [$clog2(MAX_OUTSTANDING)-1:0] unique_id;
-
+    output logic [2 * $clog2(MAX_OUTSTANDING) - 1:0] unique_id,
+    output logic valid_id
     );
 
     // ---------------- GOAL OF THIS MODULE (high-level):
@@ -46,37 +45,60 @@ module row_col_assign #(
     typedef struct packed {
         logic used;
         logic [ID_WIDTH-1:0] id;
-        logic available;
+        logic [$clog2(MAX_OUTSTANDING)-1:0] available;
         //logic release;   // <- you could use a 'release' pulse per slot if you want a direct free, but a global free_if is cleaner.
     } row_variables_t;
 
     // ---------------- THE TABLE: array of per-slot records, size MAX_OUTSTANDING.
     row_variables_t row_variables [0:MAX_OUTSTANDING-1];
 
-    // ---------------- RESET ONLY (your generate-for only resets; it does NOT implement allocation):
-    // You’re using a generate + always_ff per element just to reset. That synthesizes, but it’s heavy.
-    // A more typical pattern is one always_ff with a nested “for” that loops i=0..N-1 on reset.
-    // Keeping as-is per your request — but remember you still need:
-    //   * combinational search for existing owner and first-free
-    //   * sequential updates on allocate and free
-    genvar i;
-    generate
-        for (i = 0; i < MAX_OUTSTANDING; i = i + 1) begin : row_init
-            always_ff @(posedge clk) begin
-                if (rst) begin
-                    row_variables[i].used <= 1'b0;       // clear bookkeeping
-                    row_variables[i].id <= '0;           // clear owner id
-                    row_variables[i].available <= 1'b1;  // mark FREE on reset
-                end
-                // **** IMPORTANT: You're missing the 'else' branch ****
-                // Here is where you would normally:
-                //   - set available <= 0 when allocating this slot
-                //   - set id <= in_id on allocate
-                //   - set available <= 1 on free (and maybe clear id)
-                // Because you asked not to change code, I’m not adding it — just telling you where.
-            end
-        end
-    endgenerate
+logic [MAX_OUTSTANDING-1:0] available_row;
+/////////////////////////////////////////////////////////////////////////////////
+// Main clocked block: runs on every rising edge of clk
+always_ff @(posedge clk) begin
+  if (rst) begin
+    // ---------------- RESET BEHAVIOR ----------------
+    // Clear outputs so nothing is valid after reset
+    valid_id  <= 1'b0;
+    unique_id <= '0;
+
+    // Clear the entire slot table on reset
+    for (int j = 0; j < MAX_OUTSTANDING; j++) begin
+      row_variables[j].used      <= 1'b0; // no slot marked as used
+      row_variables[j].id        <= '0;   // clear stored ID
+      row_variables[j].available <= '0;   // convention: '0 means FREE in your code
+    end
+  end else begin
+    // ---------------- NORMAL OPERATION ----------------
+    // Give default assignments at the start of each cycle.
+    // This ensures valid_id doesn’t “stick” at 1 when no hit occurs.
+    valid_id  <= 1'b0;
+
+    // Loop over all slots in the table on this clock edge
+    for (int j = 0; j < MAX_OUTSTANDING; j++) begin
+      // If we haven’t already found a match, and this slot is used,
+      // and the stored ID equals the incoming ID...
+      if (row_variables[j].used & (row_variables[j].id == in_id)) begin
+        // Build the unique_id:
+        //   - Upper bits are the index 'j' of the slot that matched
+        //   - Lower bits are row_variables[j].available (in your convention)
+        unique_id <= {
+          j[$clog2(MAX_OUTSTANDING)-1:0],
+          row_variables[j].available[$clog2(MAX_OUTSTANDING)-1:0]
+        };
+
+        // Mark the output as valid, since we found a hit
+        valid_id <= 1'b1;
+        row_variables[j].available <= (row_variables[j].available + 1)%MAX_OUTSTANDING; // keep available as is
+
+      end
+      else begin
+        available_row[j] = &row_variables[j].used[j-1:0] & ~row_variables[j].used[j]; // find first available row
+      end
+    end
+  end
+end
+
 
     // ---------------- WHAT'S MISSING (to make this work):
     //
