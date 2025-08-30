@@ -10,18 +10,8 @@ module row_col_assign #(
 )(
     input  logic clk,            // Clock
     input  logic rst,            // Synchronous active-high reset
+    input  logic [ID_WIDTH-1:0] in_id,
 
-    // ---------------- INPUTS:
-    // 'in_id' is the ORIGINAL request ID you want to map to a unique slot.
-    input logic [ID_WIDTH-1:0] in_id,
-
-    // ---------------- OUTPUTS (INTENT):
-    // 'out_id'  — what you want to drive downstream (often you just echo in_id).
-    // 'unique_id' — slot index in [0..MAX_OUTSTANDING-1] that you “allocate” for in_id.
-    //
-    // **** NOTE: There is a SYNTAX ISSUE here in the original code: ****
-    // You are missing a comma after 'out_id' and a semicolon after 'unique_id' in the port list.
-    // Do not fix now per your request — just be aware it won’t compile until you add them.
     output logic [2 * $clog2(MAX_OUTSTANDING) - 1:0] unique_id,
     output logic valid_id
     );
@@ -93,7 +83,16 @@ always_ff @(posedge clk) begin
 
       end
       else begin
-        available_row[j] = &row_variables[j].used[j-1:0] & ~row_variables[j].used[j]; // find first available row
+        if (&row_variables[j].used[j-1:0] & ~row_variables[j].used[j]) begin // if row is the first one available
+          unique_id <= {
+            j[$clog2(MAX_OUTSTANDING)-1:0],
+            row_variables[j].available[$clog2(MAX_OUTSTANDING)-1:0]
+          };
+          valid_id <= 1'b1;
+          row_variables[j].used      <= 1'b1; // mark as used
+          row_variables[j].id        <= in_id; // store incoming id
+          row_variables[j].available <= (row_variables[j].available + 1)%MAX_OUTSTANDING; // increment available
+        end
       end
     end
   end
