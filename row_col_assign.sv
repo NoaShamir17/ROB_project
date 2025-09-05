@@ -7,11 +7,10 @@ module row_col_assign #(
     input  logic [ID_WIDTH-1:0] in_id,
 
     output logic [2 * $clog2(MAX_OUTSTANDING) - 1:0] unique_id,
-    output logic valid_id
+    //output logic valid_id
     );
 
-    logic all_used;
-
+/*
     typedef struct packed {
         logic used;     // 1 = slot is allocated, 0 = free
         logic [ID_WIDTH-1:0] id; // stored original master ID for this row
@@ -76,6 +75,62 @@ always_ff @(posedge clk) begin
 end
 
 
+*/
+
+logic [MAX_OUTSTANDING-1:0] used_rows;
+logic [$clog2(MAX_OUTSTANDING)-1:0] row;
+logic [$clog2(MAX_OUTSTANDING)-1:0] col;
+logic id_allocated;
+
+typedef struct packed {
+        logic [ID_WIDTH-1:0] id; // stored original master ID for this row
+        logic [$clog2(MAX_OUTSTANDING)-1:0] available_col; // next available column in this row
+    } row_variables_t;
+
+row_variables_t row_variables [0:MAX_OUTSTANDING-1];
+
+
+always_comb begin 
+    row = '0;
+    col = '0;
+    id_allocated = 1'b0;
+
+
+    for (int i = 0; i < MAX_OUTSTANDING; i++) begin
+        if (used_rows[i] & (row_variables[i].id == in_id)) begin //if master id is already in the table
+            row = i;
+            col = row_variables[i].available_col;
+            id_allocated = 1'b1;
+        end
+    end
+    if (!id_allocated) begin //if master id is not in the table
+        for (int j = 0; j < MAX_OUTSTANDING; j++) begin
+            if (&used_rows[j-1:0] & ~used_rows[j]) begin //find first free row
+                row = j;
+                col = row_variables[j].available_col;
+                //mark the row as used and store the id
+                used_rows[j] = 1'b1;
+                row_variables[j].used      = 1'b1; // mark as used
+                row_variables[j].id        = in_id; // store incoming id
+                break;
+            end
+        end
+    end
+    unique_id = {row, col};
+
+    
+end
+
+always_ff @(posedge clk) begin
+    if (rst) begin
+        used_rows <= '0;
+        unique_id <= '0;
+    end else begin
+        //FSM
+        
+    end
+
+end 
 
 
 
