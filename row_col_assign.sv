@@ -185,21 +185,6 @@ module row_col_assign #(
     // tag_map_q[r][c] stores the ORIGINAL ID that was allocated to {r,c} (for quick restore on free)
     logic [ID_WIDTH-1:0] tag_map_q  [NUM_ROWS][NUM_COLS], tag_map_d [NUM_ROWS][NUM_COLS];
 
-    // ---------------- Helpers ----------------
-    // Priority encoder: returns index of first '1' bit in v (LSB first).
-    // Fixed 32-bit body for simplicity; we'll zero-extend inputs shorter than 32.
-    function automatic [31:0] first_one(input logic [31:0] v);
-        int k;                          // loop variable (synthesizes to a small priority mux tree)
-        begin
-            first_one = '0;             // default = 0 (if no bits are set, result will be 0)
-            for (k = 0; k < 32; k++)    // check bits from LSB to MSB
-                if (v[k]) begin
-                    first_one = k;      // capture the first 1-bit index
-                    break;              // stop at first hit
-                end
-        end
-    endfunction
-
     // ---------------- Allocate (always_comb) ----------------
     // Combinational search signals for row selection
     logic             have_row_hit;     // 1 if an existing row is already bound to in_id
@@ -235,29 +220,32 @@ module row_col_assign #(
         end
     end
 
-    // For whichever row we will use (hit row or new row), pick the first free column
-    logic [ROW_W-1:0]    chosen_row;        // the row we plan to allocate in this cycle
-    logic [NUM_COLS-1:0] free_mask_for_row; // bit=1 means column is free
-    logic                has_free_col_in_row; // 1 if any column in chosen_row is free
-    logic [COL_W-1:0]    chosen_col;        // the first free column index we pick
+// For whichever row we will use (hit row or new row), pick the first free column
+logic [ROW_W-1:0]    chosen_row;          // the row we plan to allocate in this cycle
+logic [NUM_COLS-1:0] free_mask_for_row;   // bit=1 means column is free
+logic                has_free_col_in_row; // 1 if any column in chosen_row is free
+logic [COL_W-1:0]    chosen_col;          // the first free column index we pick
 
-    always_comb begin
-        // Policy: prefer reusing an existing row (keeps per-ID ordering localized).
-        // If no bound row exists, fall back to the first free row.
-        if (have_row_hit)   chosen_row = hit_row_idx;
-        else                chosen_row = free_row_idx;
+always_comb begin
+    // Policy: prefer reusing an existing row (keeps per-ID ordering localized).
+    // If no bound row exists, fall back to the first free row.
+    if (have_row_hit)   chosen_row = hit_row_idx;
+    else                chosen_row = free_row_idx;
 
-        // Build a "free" mask from the used bitmap (invert used to get free)
-        free_mask_for_row   = ~col_used_q[chosen_row];
+    // Build a "free" mask from the used bitmap (invert used to get free)
+    free_mask_for_row = ~col_used_q[chosen_row];
 
-        // Reduction-OR: true if at least one free column bit is 1
-        has_free_col_in_row = |free_mask_for_row;
-
-        // Priority-encode the first free column (LSB first).
-        // We zero-extend free_mask_for_row up to 32 bits to match the helper function port,
-        // then slice the result back down to COL_W bits.
-        chosen_col = first_one({{(32-NUM_COLS){1'b0}}, free_mask_for_row})[COL_W-1:0];
+    // Priority-encode the first free column (LSB first), fully parameterized (no fixed 32-bit width).
+    has_free_col_in_row = 1'b0;
+    chosen_col          = '0;
+    for (int c = 0; c < NUM_COLS; c++) begin
+        if (free_mask_for_row[c]) begin
+            has_free_col_in_row = 1'b1;
+            chosen_col          = c[COL_W-1:0];
+            break;
+        end
     end
+end
 
     // We can bind a row if either we found a hit or we found a free row.
     wire can_bind_row = have_row_hit || have_free_row;
@@ -360,6 +348,7 @@ endmodule
 
 
     
+
 
 
 
