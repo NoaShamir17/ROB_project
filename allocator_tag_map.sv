@@ -3,11 +3,6 @@ module allocator_tag_map #(
     parameter int ID_WIDTH = 4,
     parameter int NUM_ROWS  = 4,
     parameter int NUM_COLS  = 4,
-    // derived widths
-    parameter int ROW_W = (NUM_ROWS > 1) ? $clog2(NUM_ROWS) : 1,
-    parameter int COL_W = (NUM_COLS > 1) ? $clog2(NUM_COLS) : 1,
-    parameter int UID_W = ROW_W + COL_W,
-    parameter int CNT_W = $clog2(NUM_COLS+1)
 )(
     input  logic                 clk,
     input  logic                 rst, // synchronous active-high
@@ -25,11 +20,17 @@ module allocator_tag_map #(
     output logic                 free_ack
 );
 
+    // internal derived parameters
+    localparam int ROW_W = (NUM_ROWS > 1) ? $clog2(NUM_ROWS) : 1;
+    localparam int COL_W = (NUM_COLS > 1) ? $clog2(NUM_COLS) : 1;
+    localparam int UID_W = ROW_W + COL_W;
+    localparam int CNT_W = $clog2(NUM_COLS+1);
+
     // ---------------------------------------------------------------------
     // state
     // ---------------------------------------------------------------------
-    logic [NUM_ROWS-1:0]        row_is_bound_q, row_is_bound_d;
-    logic [ID_WIDTH-1:0]        bound_orig_id_q [NUM_ROWS];
+    logic [NUM_ROWS-1:0]        row_is_bound_q, row_is_bound_d; // row is bound to some original ID
+    logic [ID_WIDTH-1:0]        bound_orig_id_q [NUM_ROWS];     // original ID bound to each row
     logic [ID_WIDTH-1:0]        bound_orig_id_d [NUM_ROWS];
 
     // tag map
