@@ -1,19 +1,41 @@
 // ============================================================================
 // ar_id_ordering_unit
 // ----------------------------------------------------------------------------
-// PURPOSE:
-//   * Accepts AXI read address requests (AR channel) from the master.
-//   * Sends the ORIGINAL ARID to allocator_tag_map to request a unique_id.
-//   * When allocator grants, forwards the request to the slave with
-//     ARID replaced by the unique_id.
-//   * Ensures AXI VALID/READY rules are respected in both directions.
+// ROLE IN SYSTEM:
+//   Receives AR requests from the master, obtains a unique internal tag (UID)
+//   for the original ARID via an external allocator, and forwards the request
+//   to the slave with ARID replaced by that UID.
 //
-// LIMITATIONS:
-//   * Handles one request at a time (no internal queue).
-//   * If multiple requests arrive back-to-back, master is stalled until
-//     the current request is granted and sent forward.
-//   * For more throughput, a small FIFO can be added later.
-// ----------------------------------------------------------------------------
+// PROTOCOL NOTES (AXI-AR):
+//   • s_ar.valid/ready: handshake from master into this unit.
+//   • m_ar.valid/ready: handshake from this unit into the slave.
+//   • This unit never reorders; it accepts one request at a time.
+//   • Back-pressure: if a request is in flight (awaiting UID and/or slave
+//     acceptance), s_ar.ready is deasserted to stall the master.
+//
+// LATENCY / THROUGHPUT:
+//   • Latency includes allocator response time and the next m_ar handshake.
+//   • Throughput = one request per allocator grant + slave accept.
+//   • For higher throughput, place a FIFO in front (master side) or behind
+//     (toward the slave) and duplicate allocator requests per entry.
+//
+// RESET BEHAVIOR:
+//   • On reset, the unit returns to idle, ready to accept a new request.
+//   • No partially accepted request is retained across reset.
+//
+// INTEGRATION POINTS:
+//   • Connect alloc_req/alloc_in_id to your tag allocator.
+//   • When alloc_gnt is high, unique_id must hold a stable UID for the
+//     captured request until the downstream handshake completes.
+//   • Extend pass-through fields (e.g., ARQOS/ARCACHE/ARUSER) where noted.
+//
+// SAFETY / CORNER CASES COVERED:
+//   • If the allocator grants but the slave is not ready, the request remains
+//     pending (m_ar.valid stays asserted) until m_ar.ready.
+//   • If the slave is ready but the allocator hasn’t granted yet, no request
+//     is driven to the slave.
+//   • The master is only acknowledged (ready) at idle, preventing overrun.
+// ============================================================================
 
 module ar_id_ordering_unit #(
     parameter int ID_WIDTH   = 4,   // width of master’s ARID
@@ -31,42 +53,47 @@ module ar_id_ordering_unit #(
     ar_if.master m_ar,
 
     // ---------------- Allocator interface ---------------------------------
-    output logic                 alloc_req,    // pulse: ask allocator for UID
+    output logic                 alloc_req,    // request UID for captured ARID
     output logic [ID_WIDTH-1:0]  alloc_in_id,  // original ARID sent to allocator
-    input  logic                 alloc_gnt,    // allocator says "UID ready"
-    input  logic [UID_WIDTH-1:0] unique_id     // allocator’s granted unique ID
+    input  logic                 alloc_gnt,    // allocator indicates UID is ready
+    input  logic [UID_WIDTH-1:0] unique_id     // the granted UID (stable when gnt)
 );
 
-    // ---------------- FSM encoding ----------------
-    typedef enum logic [1:0] {
-        WAIT_REQ,   // wait for new request from master
-        WAIT_GNT    // waiting for allocator grant + forwarding to slave
-    } state_e;
+    // =========================================================================
+    // STATE MACHINE (one-hot)
+    //   state_q[0] : IDLE  (WAIT_REQ) — accept a new AR request
+    //   state_q[1] : ISSUE (WAIT_GNT) — waiting for allocator and forwarding
+    // Rationale: one-hot keeps next-state equations shallow and easy to time.
+    // =========================================================================
+    localparam int ST_REQ = 0; // idle / waiting for master request
+    localparam int ST_GNT = 1; // waiting for UID grant and downstream accept
 
-    state_e state_q, state_d; // state register + next-state
+    logic [1:0] state_q, state_d;
 
-    // ---------------- Latches for AR fields ----------------
-    // When we handshake with master (s_ar.valid && s_ar.ready),
-    // capture the request fields here so they stay stable
-    // until allocator returns a UID.
+    // =========================================================================
+    // PIPELINED HOLD OF AR FIELDS
+    //   Captured at the moment we accept the master’s request, then held
+    //   until we forward it with the translated ID.
+    // =========================================================================
     logic [ADDR_WIDTH-1:0] addr_q;
     logic [LEN_WIDTH-1:0]  len_q;
     logic [2:0]            size_q;
     logic [1:0]            burst_q;
     logic [ID_WIDTH-1:0]   id_q;
 
-    // ========================================================================
-    // SEQUENTIAL BLOCK
-    // ========================================================================
+    // =========================================================================
+    // SEQUENTIAL: state & captures
+    // =========================================================================
     always_ff @(posedge clk or posedge rst) begin
         if (rst) begin
-            state_q <= WAIT_REQ;
+            // IDLE on reset
+            state_q <= 2'b01;
         end else begin
             state_q <= state_d;
         end
 
-        // Capture AR fields on master handshake
-        if (s_ar.valid && s_ar.ready) begin
+        // Capture AR fields exactly on master handshake
+        if (s_ar.valid & s_ar.ready) begin
             addr_q  <= s_ar.addr;
             len_q   <= s_ar.len;
             size_q  <= s_ar.size;
@@ -75,61 +102,60 @@ module ar_id_ordering_unit #(
         end
     end
 
-    // ========================================================================
-    // MASTER-SIDE HANDSHAKE (s_ar)
-    // ========================================================================
-    // Ready is asserted only in WAIT_REQ, meaning we can only take one request
-    // at a time. Once we’ve accepted a request, we stop accepting until it is
-    // fully granted and forwarded.
-    assign s_ar.ready = (state_q == WAIT_REQ);
+    // =========================================================================
+    // MASTER SIDE: back-pressure policy
+    //   • Ready only when idle → strictly one request in flight.
+    //   • Keeps upstream simple and AXI-compliant.
+    // =========================================================================
+    assign s_ar.ready = state_q[ST_REQ];
 
-    // ========================================================================
-    // ALLOCATOR HANDSHAKE
-    // ========================================================================
-    // alloc_req is asserted in WAIT_GNT to request a unique_id for the
-    // captured ARID. The allocator returns alloc_gnt + unique_id asynchronously.
-    assign alloc_req   = (state_q == WAIT_GNT);
+    // =========================================================================
+    // ALLOCATOR SIDE: request/ID pass-through
+    //   • Assert request while in ISSUE state.
+    //   • Original ID is whatever we captured from the master.
+    // =========================================================================
+    assign alloc_req   = state_q[ST_GNT];
     assign alloc_in_id = id_q;
 
-    // ========================================================================
-    // SLAVE-SIDE DRIVE (m_ar)
-    // ========================================================================
-    // Once allocator grants, we can drive a valid request to the slave.
-    // ARID is replaced by unique_id (internal translation).
-    assign m_ar.valid = (state_q == WAIT_GNT) && alloc_gnt;
-    assign m_ar.id    = unique_id;   // translated ID
-    assign m_ar.addr  = addr_q;      // original address
-    assign m_ar.len   = len_q;       // burst length
-    assign m_ar.size  = size_q;      // transfer size
-    assign m_ar.burst = burst_q;     // burst type
-    // NOTE: if you have more fields (ARQOS/ARCACHE/ARUSER), add them here too.
+    // =========================================================================
+    // SLAVE SIDE: drive translated request
+    //   • Valid once a UID is available and we are in ISSUE state.
+    //   • ARID is replaced by unique_id; other fields are forwarded as-is.
+    //   • If downstream stalls, valid remains asserted until ready.
+    // =========================================================================
+    assign m_ar.valid = (state_q[ST_GNT] & alloc_gnt);
+    assign m_ar.id    = unique_id;
+    assign m_ar.addr  = addr_q;
+    assign m_ar.len   = len_q;
+    assign m_ar.size  = size_q;
+    assign m_ar.burst = burst_q;
+    // NOTE: add ARQOS/ARCACHE/ARLOCK/ARPROT/ARUSER/etc. if present in ar_if.
 
-    // ========================================================================
-    // NEXT-STATE LOGIC
-    // ========================================================================
+    // =========================================================================
+    // HANDSHAKE SHORT-NAMES (clarity only)
+    // =========================================================================
+    wire hs_master = s_ar.valid & s_ar.ready; // accepted from master
+    wire hs_slave  = m_ar.valid & m_ar.ready; // delivered to slave
+    wire gnt       = alloc_gnt;               // UID is available this cycle
+
+    // =========================================================================
+    // NEXT-STATE: single-cycle flow control
+    //   IDLE  → ISSUE : on master handshake
+    //   ISSUE → IDLE  : when both UID is granted and slave accepts
+    //   Otherwise remain in current state.
+    // =========================================================================
     always_comb begin
-        state_d = state_q; // default: stay
+        state_d = 2'b00;
 
-        case (state_q)
-            // ---------------- WAIT_REQ ----------------
-            // Wait for a master request. When handshake occurs,
-            // move to WAIT_GNT to request a UID.
-            WAIT_REQ: begin
-                if (s_ar.valid && s_ar.ready) begin
-                    state_d = WAIT_GNT;
-                end
-            end
+        // IDLE bit (ST_REQ)
+        state_d[ST_REQ] =
+              (state_q[ST_REQ] & ~hs_master)   // keep waiting for a request
+            | (state_q[ST_GNT] &  (gnt & hs_slave)); // finished issuing → go idle
 
-            // ---------------- WAIT_GNT ----------------
-            // Wait for allocator to grant a UID.
-            // Once granted and slave accepts (m_ar.valid && m_ar.ready),
-            // return to WAIT_REQ to accept the next request.
-            WAIT_GNT: begin
-                if (alloc_gnt && m_ar.valid && m_ar.ready) begin
-                    state_d = WAIT_REQ;
-                end
-            end
-        endcase
+        // ISSUE bit (ST_GNT)
+        state_d[ST_GNT] =
+              (state_q[ST_REQ] &  hs_master)   // got a new request → start issuing
+            | (state_q[ST_GNT] & ~(gnt & hs_slave)); // keep issuing until both done
     end
 
 endmodule
