@@ -65,7 +65,7 @@ module r_id_ordering_unit #(
     // ---------------- Waiting memory interface ----------------
     output logic                 wm_write_en,   // store out-of-order response
     output logic [UID_W-1:0]     wm_write_uid,
-    r_if.sender                  wm_write_data,
+    r_if.sender                  wm_write_data, //TODO: write to response waiting memory
 
     output logic                 wm_release_en, // request release of stored response
     output logic [UID_W-1:0]     wm_release_uid,
@@ -80,8 +80,8 @@ module r_id_ordering_unit #(
 
     // Release pointers per row (wrap-around COL_W bits)
 
-    localparam int ROW_W = $clog2(NUM_ROWS);
-    localparam int COL_W = $clog2(NUM_COLS);
+    localparam int ROW_W = $bits(NUM_ROWS);
+    localparam int COL_W = $bits(NUM_COLS);
     logic [COL_W-1:0] release_idx [NUM_ROWS];
 
     // Bookkeeping: which {row,col} are waiting in wm
@@ -110,6 +110,7 @@ module r_id_ordering_unit #(
 
     //check if direct hit
     assign direct_hit = resp_valid & ~|(resp_col ^ release_idx[resp_row]);
+    
 
     //check if waiting memory has a hit
     // Priority-encode first row with a hit
@@ -169,7 +170,7 @@ module r_id_ordering_unit #(
         end else if (wm_hit) begin
             release_valid   = 1'b1;
             r_out.valid     = 1'b1;
-            r_out.id        = wm_release_data.id;
+            r_out.id        = restored_id;
             r_out.data      = wm_release_data.data;
             r_out.resp      = wm_release_data.resp;
             r_out.last      = wm_release_data.last;
@@ -179,7 +180,7 @@ module r_id_ordering_unit #(
             wm_release_en   = 1'b1;
             wm_release_uid  = wm_hit_uid;
 
-        end else if (resp_valid && !direct_hit && !wm_full) begin
+        end else if (resp_valid & !direct_hit & !wm_full) begin
             // Out-of-order arrival → store in waiting memory
             wm_write_en  = 1'b1;
             wm_write_uid = resp_uid;
