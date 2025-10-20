@@ -18,6 +18,12 @@
 //
 // Allocator (allocator_tag_map) is shared by ar_id_ordering_unit (alloc) and
 // r_id_ordering_unit (free + restored ID lookup).
+
+//TODO: implement everything marked as TODO in the code below
+//TODO: count how many cycles it takes for a request to go from axi_ar_in to axi_ar_out
+//TODO: count how many cycles it takes for a response to go from axi_r_in to axi_r_out
+//TODO: check if r_id_ordering_unit needs FSM like ar_id_ordering_unit
+//TODO: add the "last" signal to response_park and every where it's missing and check what happens with multi-beat requests/responses
 // ============================================================================
 module top_module #(
     parameter int ID_WIDTH          = 4,
@@ -61,7 +67,7 @@ module top_module #(
     } axi_ar_fields_t;
 
     // Define AXI Read Data fields structure for FIFOs
-    // This is the struct provided by the user, minus 'valid' and 'ready'
+    // This is the struct of the usual metadata, minus 'valid' and 'ready'
     typedef struct packed {
         logic [ID_WIDTH-1:0] id;
         logic [DATA_WIDTH-1:0] data;
@@ -202,7 +208,6 @@ module top_module #(
         .in_id           (alloc_in_id),
         .alloc_gnt       (alloc_gnt),
         .unique_id       (alloc_unique_id),
-        // The user requested this signal to be added/checked
         .tag_map_full    (tag_map_full), // TODO: allocator_tag_map.sv needs to implement this signal
         .free_req        (free_req),
         .free_unique_id  (free_unique_id),
@@ -249,7 +254,8 @@ module top_module #(
     );
     // Note: The ar_id_ordering_unit is designed to take the request directly
     // and not from a FIFO, so we treat the FIFO output handshake as the
-    // master side handshake (s_ar.valid/ready).
+    // master side handshake (s_ar.valid/ready). 
+    //TODO: change that, ar_id_ordering_unit should not behave like master
 
     // ========================================================================
     // 3. r_response_waiting_memory (response_park) Instantiation
@@ -269,6 +275,7 @@ module top_module #(
         // ENQUEUE (from r_id_ordering_unit when OOO)
         .in_valid       (wm_write_en),
         .in_ready       (/* r_park_full is used to determine readiness */), // Unused in this direction
+                                                                            //TODO: delete this signal from response_park.sv
         .in_uid         (wm_write_uid),
         .in_data        (wm_write_payload.data),
         .in_resp        (wm_write_payload.resp),
@@ -287,8 +294,8 @@ module top_module #(
         .out_orig_id    (wm_release_payload.id),
         .out_tagid      (wm_release_payload.tagid),
         // Ack/Status
-        .free_ack       (/* unused */),
-        // TODO: The user requested a 'not full' signal from response_park
+        .free_ack       (/* unused */), //TODO: figure out if needed
+        // TODO: needed 'not full' signal from response_park
         // I will use an internal signal from response_park for backpressure.
         .full           (r_park_full) // Assume response_park has a 'full' output
     );
@@ -327,7 +334,7 @@ module top_module #(
         .r_out.tagid     (fifo4_in_data.tagid),
 
         // Allocator/Free interface (needs restored_id from allocator_tag_map)
-        .restored_id     (restored_id), // TODO: r_id_ordering_unit.sv needs this input to set r_out.id
+        .restored_id     (restored_id), // TODO: r_id_ordering_unit.sv needs this input to set r_out.id. add this unput signal to r_id_ordering_unit.sv
 
         // Waiting memory interface (to/from response_park)
         .wm_write_en     (wm_write_en),
@@ -349,7 +356,7 @@ module top_module #(
         .wm_release_data.id    (wm_release_payload.id),
         .wm_release_data.data  (wm_release_payload.data),
         .wm_release_data.resp  (wm_release_payload.resp),
-        .wm_release_data.last  (1'b1), // response_park doesn't have 'last', assume 1 beat response for simplicity
+        .wm_release_data.last  (1'b1), // response_park doesn't have 'last', assume 1 beat response for simplicity //TODO: add last to everything
         .wm_release_data.tagid (wm_release_payload.tagid),
 
         // Backpressure from response_park
@@ -384,6 +391,7 @@ module top_module #(
     // is wired back to response_park, but response_park uses a request/grant pulse.
     // We assume the r_id_ordering_unit does not need to backpressure the response_park
     // and simply consumes the data when 'wm_release_en' and 'wm_release_gnt' are both high.
+    //TODO: perhaps change signals accordingly in r_id_ordering_unit.sv and response_park.sv
 
 
     // ========================================================================
@@ -393,7 +401,7 @@ module top_module #(
     // FIFO 1: incoming_request_fifo (AXI AR fields)
     // Push condition: axi_ar_in.valid & ~fifo1_full (implied by fifo1_in_ready)
     // Pop condition: allocator_tag_map is not full (implied by ~tag_map_full)
-    // The logic requested by the user is slightly different than a standard FIFO.
+    // suggestion: implement with standard fifo. below that is a non-standard fifo control.
     // Standard FIFO: Push when in_valid & in_ready. Pop when out_valid & out_ready.
     // We override the push/pop readiness logic below.
     fifo_module #(.D_WIDTH($bits(axi_ar_fields_t)), .DEPTH(16)) i_fifo_ar_in (
@@ -467,8 +475,7 @@ module top_module #(
     // new request AND the allocator can grant it (preventing deadlock by
     // only accepting if a UID can be granted).
     // The ar_id_ordering_unit handles its own backpressure (s_ar.ready).
-    // The user explicitly requested an additional check:
-    // TODO: The user requested a check for allocator_tag_map not full (~tag_map_full)
+    // TODO: We need a check for allocator_tag_map not full (~tag_map_full)
     // to be part of the pop condition for FIFO 1.
     // The current ar_id_ordering_unit has its own backpressure logic (s_ar.ready).
     // For now, we connect FIFO 1 output ready to ar_id_ordering_unit input ready.
@@ -477,7 +484,7 @@ module top_module #(
     // Given the current ar_id_ordering_unit, the backpressure is internal to it.
     // We assume ar_id_ordering_unit ready signal (fifo1_out_ready) implicitly includes
     // the tag map fullness check to prevent deadlock.
-    // If the user's intent is to connect tag_map_full to the FIFO, we must:
+    // If our intent is to connect tag_map_full to the FIFO, we must:
     // assign fifo1_out_ready = i_ar_id_ordering_unit.s_ar.ready & ~tag_map_full;
     // but the ar_id_ordering_unit does not expose a ready signal for S_AR.
     // Therefore, we trust the ar_id_ordering_unit's internal logic for now.
@@ -491,7 +498,7 @@ module top_module #(
     // The r_id_ordering_unit accepts a response if:
     // 1. It's a direct hit (and can be immediately released to FIFO 4)
     // 2. It's an out-of-order miss, AND the response_park (wm) is not full.
-    // TODO: The user requested pop if (hit in r_id_ordering_unit) OR (response_park not full).
+    // TODO: We need pop if (hit in r_id_ordering_unit) OR (response_park not full).
     // The r_id_ordering_unit.sv does not expose an explicit ready signal for its input.
     // We assume the internal logic of r_id_ordering_unit implicitly drives
     // the ready signal high when it is ready to consume (based on the FIFO pop conditions).
