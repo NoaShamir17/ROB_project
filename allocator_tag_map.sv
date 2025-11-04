@@ -1,8 +1,9 @@
 module allocator_tag_map #(
     // External AXI ID width (ARID/RID)
     parameter int ID_WIDTH = 4,
-    parameter int NUM_ROWS  = 4,
-    parameter int NUM_COLS  = 4,
+    parameter int MAX_OUTSTANDING = 16,
+    parameter int NUM_ROWS  = $bits(MAX_OUTSTANDING),
+    parameter int NUM_COLS  = $bits(MAX_OUTSTANDING)
 )(
     input  logic                 clk,
     input  logic                 rst, // synchronous active-high
@@ -12,6 +13,7 @@ module allocator_tag_map #(
     input  logic [ID_WIDTH-1:0]  in_id,
     output logic                 alloc_gnt,
     output logic [UID_W-1:0]     unique_id,
+    output logic                 tag_map_full, //TODO: check if needed - if so, implement
 
     // free interface
     input  logic                 free_req,
