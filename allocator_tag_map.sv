@@ -26,7 +26,7 @@ module allocator_tag_map #(
     localparam int ROW_W = $bits(NUM_ROWS);
     localparam int COL_W = $bits(NUM_COLS);
     localparam int UID_W = ROW_W + COL_W;
-    localparam int CNT_W = $bits(NUM_COLS+1);
+    localparam int PER_ROW_CNT_W = $bits(NUM_COLS+1);
 
     // ---------------------------------------------------------------------
     // state
@@ -48,6 +48,8 @@ module allocator_tag_map #(
     logic [CNT_W-1:0]           used_count_current [NUM_ROWS];
     logic [CNT_W-1:0]           used_count_next [NUM_ROWS];
 
+    //
+
     // decode free_unique_id
     wire [ROW_W-1:0]            free_row_idx = free_unique_id[ROW_W+COL_W-1 : COL_W];
     wire [COL_W-1:0]            free_col_idx = free_unique_id[COL_W-1 : 0];
@@ -58,6 +60,7 @@ module allocator_tag_map #(
     logic [ROW_W-1:0] hit_row_idx;      // index of matching row (if any)
     logic             have_unbound_row; // is there any unbound row
     logic [ROW_W-1:0] first_unbound_row_idx; // index of first unbound row (if any)
+    logic             bound_row_found;
     // ---------------------------------------------------------------------
     // combinational next-state + outputs
     // ---------------------------------------------------------------------
@@ -85,14 +88,17 @@ module allocator_tag_map #(
         // clear row selection signals
         have_row_hit        = 1'b0; hit_row_idx = '0;
         have_unbound_row    = 1'b0; first_unbound_row_idx = '0;
+        bound_row_found = 1'b0;
 
         // --- row selection: find hit row and first free row ---
+        //TODO: change loop - without flags!
         for (int r = 0; r < NUM_ROWS; r++) begin
-            if (!have_row_hit && row_is_bound_current[r] && (bound_orig_id_current[r] == in_orig_id)) begin
+            bound_row_found = row_is_bound_current[r] & (~|(bound_orig_id_current[r] ^ in_orig_id));
+            if (~have_row_hit & bound_row_found) begin
                 have_row_hit = 1'b1;
                 hit_row_idx  = ROW_W'(r);
             end
-            if (!have_unbound_row && !row_is_bound_current[r]) begin
+            if (~have_unbound_row & ~row_is_bound_current[r]) begin
                 have_unbound_row = 1'b1;
                 first_unbound_row_idx = ROW_W'(r);
             end
@@ -100,8 +106,9 @@ module allocator_tag_map #(
 
         logic [ROW_W-1:0] chosen_row_idx;
         chosen_row_idx = have_row_hit ? hit_row_idx : first_unbound_row_idx;
-        logic can_choose_row = (have_row_hit | have_unbound_row);
+        logic can_choose_row = have_row_hit | have_unbound_row;
 
+        //TODO: consider removing this part
         // Consider a simultaneous free in the same row: that frees a slot before allocation.
         // Compute effective used count for chosen row *if* free happens there this cycle.
         logic [CNT_W-1:0] eff_used_chosen;
