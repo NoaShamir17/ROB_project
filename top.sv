@@ -19,6 +19,7 @@
 // Allocator (allocator_tag_map) is shared by ar_id_ordering_unit (alloc) and
 // r_id_ordering_unit (free + restored ID lookup).
 
+//TODO: match all r_if and ar_if
 //TODO: implement everything marked as TODO in the code below
 //TODO: count how many cycles it takes for a request to go from axi_ar_in to axi_ar_out
 //TODO: count how many cycles it takes for a response to go from axi_r_in to axi_r_out
@@ -38,12 +39,12 @@ module top_module #(
     input  logic rst,
 
     // AXI Read Address Channel (AR) Master Interface (Input to this module)
-    ar_if.receiver axi_ar_in,
+    ar_if.receiver axi_ar_in, //TODO: need to add more fields according to Gil's slides or AXI protocol document
     ar_if.sender    axi_ar_out,
 
     // AXI Read Data Channel (R) Slave Interface (Output from this module)
-    r_if.sender     axi_r_out,
-    r_if.receiver   axi_r_in
+    r_if.sender     axi_r_out, //TODO: need to add more fields according to Gil's slides or AXI protocol document
+    r_if.receiver   axi_r_in 
 );
 
     // ------------------------------------------------------------------------
@@ -51,8 +52,8 @@ module top_module #(
     // ------------------------------------------------------------------------
     localparam int NUM_ROWS = $bits(MAX_OUTSTANDING);
     localparam int NUM_COLS = $bits(MAX_OUTSTANDING);
-    localparam int ROW_W = (NUM_ROWS > 1) ? $clog2(NUM_ROWS) : 1;
-    localparam int COL_W = (NUM_COLS > 1) ? $clog2(NUM_COLS) : 1;
+    localparam int ROW_W = $bits(NUM_ROWS);
+    localparam int COL_W = $bits(NUM_COLS);
     localparam int UID_W = ROW_W + COL_W; // Unique ID width
 
     // Define AXI Read Address fields structure for FIFOs
