@@ -11,18 +11,17 @@ module id_allocate_and_restore_unit #(
     input  logic                 alloc_req,
     input  logic [ID_WIDTH-1:0]  in_orig_id,
     output logic                 alloc_gnt,
-    output logic [UID_W-1:0]     unique_id,
+    output logic [ID_WIDTH-1:0]     unique_id,
     output logic                 id_matrix_full, //TODO: check if needed - if so, implement
 
     // free interface
     input  logic                 free_req,
-    input  logic [UID_W-1:0]     unique_id_to_free,
+    input  logic [ID_WIDTH-1:0]  unique_id_to_free,
     output logic [ID_WIDTH-1:0]  restored_id,
     output logic                 free_ack
 );
     localparam int ROW_W = $bits(NUM_ROWS);
     localparam int COL_W = $bits(NUM_COLS);
-    localparam int UID_W = ROW_W + COL_W;
     localparam int PER_ROW_CNT_W = $bits(NUM_COLS+1);
     localparam int TOT_REQ_CNT_W = $bits(MAX_OUSTSTANDING + 1);
 
@@ -49,7 +48,7 @@ module id_allocate_and_restore_unit #(
     logic [TOT_REQ_CNT_W-1:0]           tot_used_count_current;
     logic [TOT_REQ_CNT_W-1:0]           tot_used_count_next;
 
-    assign id_matrix_full = (used__count_current == TOT_REQ_CNT_W'(MAX_OUTSTANDING));
+    assign id_matrix_full = (used_count_current == TOT_REQ_CNT_W'(MAX_OUTSTANDING));
 
     // ---------------------------------------------------------------------
     // row selection logic
@@ -68,7 +67,7 @@ module id_allocate_and_restore_unit #(
         
     // allocation signals
     assign alloc_gnt = alloc_req & (have_row_hit | have_unbound_row) & ~id_matrix_full;
-    assign unique_id = {chosen_row_idx, chosen_col_idx};
+    assign unique_id = {(ID_WIDTH-ROW_W-COL_W){1'b0},chosen_row_idx, chosen_col_idx};//unique_id is zero-padded to ID_WIDTH
 
     // slot selection combinational logic
     always_comb begin : slot_selection_logic
@@ -205,24 +204,27 @@ module id_allocate_and_restore_unit #(
     always_ff @(posedge clk) begin
         if (rst) begin
             row_is_bound_current <= '0;
+            tot_used_count_current <= '0;
             for (int r = 0; r < NUM_ROWS; r++) begin
                 bound_orig_id_current[r] <= '0;
                 available_col_current[r] <= '0;
                 used_count_current[r]    <= '0;
                 for (int c = 0; c < NUM_COLS; c++) begin
-                    tag_map_q[r][c] <= '0;
+                    id_matrix[r][c] <= '0;
+                    id_matrix_we[r][c] <= 1'b0;
                 end
             end
             free_ack <= 1'b0;
         end else begin
             row_is_bound_current <= row_is_bound_next;
+            tot_used_count_current <= tot_used_count_next;
             for (int r = 0; r < NUM_ROWS; r++) begin
                 bound_orig_id_current[r] <= bound_orig_id_next[r];
                 available_col_current[r] <= available_col_next[r];
                 used_count_current[r]    <= used_count_next[r];
                 for (int c = 0; c < NUM_COLS; c++) begin
-                    if (tag_we[r][c]) begin
-                        tag_map_q[r][c] <= in_orig_id; // tag write uses in_orig_id from the allocation request
+                    if (id_matrix_we[r][c]) begin
+                        id_matrix[r][c] <= in_orig_id; // tag write uses in_orig_id from the allocation request
                     end
                     // else leave tag_map_q as-is (don't overwrite on free)
                 end
