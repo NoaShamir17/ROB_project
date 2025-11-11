@@ -199,19 +199,19 @@ module top_module #(
     // ========================================================================
     // 1. allocator_tag_map Instantiation
     // ========================================================================
-    allocator_tag_map #(
+    id_allocate_and_restore_unit #(
         .ID_WIDTH(ID_WIDTH),
         .MAX_OUTSTANDING(MAX_OUTSTANDING)
     ) i_allocator_tag_map (
         .clk             (clk),
         .rst             (rst),
         .alloc_req       (alloc_req),
-        .in_id           (alloc_in_id),
+        .in_orig_id           (alloc_in_id),
         .alloc_gnt       (alloc_gnt),
         .unique_id       (alloc_unique_id),
-        .tag_map_full    (tag_map_full), // TODO: allocator_tag_map.sv needs to implement this signal
+        .id_matrix_full    (tag_map_full), // TODO: allocator_tag_map.sv needs to implement this signal
         .free_req        (free_req),
-        .free_unique_id  (free_unique_id),
+        .unique_id_to_free (free_unique_id),
         .restored_id     (restored_id),
         .free_ack        (free_ack)
     );
