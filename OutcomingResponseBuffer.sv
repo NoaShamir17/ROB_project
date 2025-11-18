@@ -1,249 +1,154 @@
 // ============================================================================
-// OutComingResponseBuffer
+// OutcomingResponseBuffer.sv
 // ----------------------------------------------------------------------------
-// • r_if.receiver in_r  : receives R-beats from internal logic (post-ordering unit)
-// • fifo (whole-burst)  : aggregates each burst into one entry (kind=1)
-// • r_if.sender   out_r : streams bursts to AXI master
-// ----------------------------------------------------------------------------
-// Operation Summary:
-//   - Accept all beats normally.
-//   - If the current beat is LAST and FIFO is full → backpressure (in_r.ready=0).
-//   - Push to FIFO exactly when accepting LAST beat (atomic).
-//   - Stream stored bursts from FIFO to out_r.
-//   - Pop FIFO only after LAST beat of the burst has been accepted by master.
-// ----------------------------------------------------------------------------
-// Implementation Rules:
-//   - Bitwise-only combinational control (~, &, |). No &&, ||, !.
-//   - Full-burst FIFO entries (kind=1, R payloads).
-//   - Maintains strict burst order (no bypass).
+// 8-entry FIFO for AXI R beats on the outgoing side.
+//
+// r_in  : R from r_id_ordering_unit  (r_if.receiver)
+// r_out : R to AXI master            (r_if.sender)
+//
+// Behavior:
+//   - When not full, r_in.ready = 1 and we accept beats on
+//       r_in.valid & r_in.ready (push).
+//   - When not empty, r_out.valid = 1 and we provide the oldest beat.
+//       On r_out.valid & r_out.ready we pop that beat.
+//
+// Control uses only bitwise &, |, ~ (no &&, ||, !).
 // ============================================================================
 
-module OutComingResponseBuffer #(
-    parameter ID_WIDTH      = 4,
-    parameter TAG_WIDTH     = 4,
-    parameter int DATA_WIDTH = 64,
-    parameter int MAX_BEATS  = 32,
-    parameter int FIFO_DEPTH = 16
+module OutcomingResponseBuffer #(
+    parameter int ID_WIDTH    = 4,
+    parameter int DATA_WIDTH  = 64,
+    parameter int RESP_WIDTH  = 2,
+    parameter int DEPTH       = 8
 )(
     input  logic clk,
-    input  logic rst,               // synchronous active-high reset
+    input  logic rst,          // async, active-high
 
-    // Beat input from internal logic (we are receiver)
-    r_if.receiver in_r,
+    // R from r_id_ordering_unit
+    r_if.receiver r_in,
 
-    // Beat output to AXI master (we are sender)
-    r_if.sender   out_r
+    // R towards AXI master
+    r_if.sender   r_out,
+
+    // NEW: explicit full indicator
+    output logic OutcomingResponse_buffer_full
 );
 
-    // ===========================================================
-    // Local params
-    // ===========================================================
-    localparam int NBEATS_W = $clog2(MAX_BEATS + 1);
+    // -------------------------------------------------------------
+    // One R entry record (single beat)
+    // -------------------------------------------------------------
+    typedef struct packed {
+        logic [ID_WIDTH-1:0]    id;
+        logic [DATA_WIDTH-1:0]  data;
+        logic [RESP_WIDTH-1:0]  resp;
+        logic                   last;
+    } r_entry_t;
 
-    // ===========================================================
-    // FIFO signals
-    // ===========================================================
-    logic fifo_empty, fifo_full;
-    logic fifo_push, fifo_pop;
-    logic fifo_alloc_gnt, fifo_free_ack;
+    localparam int PTR_W = (DEPTH <= 2) ? 1 : $clog2(DEPTH);
+    localparam int CNT_W = $clog2(DEPTH + 1);
 
-    // FIFO write (din_*)
-    logic        din_kind;
-    logic [7:0]  din_id;
-    logic [31:0] din_addr;
-    logic [7:0]  din_len;
-    logic [2:0]  din_size;
-    logic [1:0]  din_burst;
-    logic [3:0]  din_qos;
-    logic [1:0]  din_rresp;
-    logic [NBEATS_W-1:0]             din_nbeats;
-    logic [MAX_BEATS*DATA_WIDTH-1:0] din_payload;
-    logic [7:0]  din_tag;
+    // FIFO storage
+    r_entry_t         mem     [0:DEPTH-1];
+    logic [PTR_W-1:0] wr_ptr_q;
+    logic [PTR_W-1:0] rd_ptr_q;
+    logic [CNT_W-1:0] count_q;
 
-    // FIFO read (dout_*)
-    logic        dout_kind;
-    logic [7:0]  dout_id;
-    logic [31:0] dout_addr;
-    logic [7:0]  dout_len;
-    logic [2:0]  dout_size;
-    logic [1:0]  dout_burst;
-    logic [3:0]  dout_qos;
-    logic [1:0]  dout_rresp;
-    logic [NBEATS_W-1:0]             dout_nbeats;
-    logic [MAX_BEATS*DATA_WIDTH-1:0] dout_payload;
-    logic [7:0]  dout_tag;
+    // Status flags
+    logic             empty;
+    logic             full;
 
-    // ===========================================================
-    // Collector: aggregates incoming beats into full bursts
-    // ===========================================================
-    logic                        collecting_q;
-    logic [ID_WIDTH-1:0]         rid_q;
-    logic [NBEATS_W-1:0]         beats_q;
-    logic [1:0]                  last_rresp_q;
-    logic [MAX_BEATS*DATA_WIDTH-1:0] payload_q;
-
-    // Accept rule: stall only when last beat and FIFO full
-    wire stall_last = in_r.last & fifo_full;
-    assign in_r.ready = ~stall_last;  // bitwise only
-
-    // Beat handshake
-    wire take_beat = in_r.valid & in_r.ready;
-    wire last_beat = in_r.last;
-
-    // Increment helper
-    wire [NBEATS_W-1:0] beats_inc = beats_q + {{(NBEATS_W-1){1'b0}}, 1'b1};
-
-    // Push to FIFO only on accepting last beat
-    assign fifo_push = take_beat & last_beat;
-
-    // FIFO write data (response entry)
+    // -------------------------------------------------------------
+    // Empty / full
+    // -------------------------------------------------------------
     always_comb begin
-        din_kind    = 1'b1; // response
-        din_id      = {{(8-ID_WIDTH){1'b0}}, rid_q};
-        din_addr    = 32'b0;
-        din_len     = 8'b0;
-        din_size    = 3'b0;
-        din_burst   = 2'b0;
-        din_qos     = 4'b0;
-        din_rresp   = last_rresp_q;
-        din_nbeats  = beats_q;
-        din_payload = payload_q;
-        din_tag     = {{(8-TAG_WIDTH){1'b0}}, rid_q[TAG_WIDTH-1:0]};
+        empty = (count_q == '0);
+        full  = (count_q == DEPTH[CNT_W-1:0]);
+
+        // export full flag
+        OutcomingResponse_buffer_full = full;
     end
 
-    // Collector sequential logic
-    always_ff @(posedge clk) begin
+    // -------------------------------------------------------------
+    // Handshake and fire signals
+    // -------------------------------------------------------------
+    logic push;   // accept new beat from ordering unit
+    logic pop;    // release beat to master
+
+    // Upstream sees ready when not full
+    always_comb begin
+        r_in.ready = ~full;           // bitwise not
+    end
+
+    // Downstream sees valid when not empty
+    always_comb begin
+        r_out.valid = ~empty;         // bitwise not
+    end
+
+    // Push/pop conditions (bitwise & only)
+    always_comb begin
+        push = r_in.valid & r_in.ready;
+        pop  = r_out.valid & r_out.ready;
+    end
+
+    // -------------------------------------------------------------
+    // Head entry → r_out (combinational)
+    // -------------------------------------------------------------
+    always_comb begin
+        r_out.id   = mem[rd_ptr_q].id;
+        r_out.data = mem[rd_ptr_q].data;
+        r_out.resp = mem[rd_ptr_q].resp;
+        r_out.last = mem[rd_ptr_q].last;
+        // If empty == 1, values are don't-care; consumer checks r_out.valid
+    end
+
+    // -------------------------------------------------------------
+    // Sequential update: write, read, count, pointers
+    // -------------------------------------------------------------
+    always_ff @(posedge clk or posedge rst) begin
         if (rst) begin
-            collecting_q <= 1'b0;
-            rid_q        <= {ID_WIDTH{1'b0}};
-            beats_q      <= {NBEATS_W{1'b0}};
-            last_rresp_q <= 2'b00;
-            payload_q    <= {MAX_BEATS*DATA_WIDTH{1'b0}};
+            wr_ptr_q <= '0;
+            rd_ptr_q <= '0;
+            count_q  <= '0;
         end
         else begin
-            if (take_beat) begin
-                // First beat
-                if (collecting_q == 1'b0) begin
-                    collecting_q <= 1'b1;
-                    rid_q        <= in_r.id[ID_WIDTH-1:0];
-                    beats_q      <= {{(NBEATS_W-1){1'b0}},1'b1};
-                    payload_q[0 +: DATA_WIDTH] <= in_r.data;
-                    last_rresp_q <= in_r.resp;
-                end
-                // Middle/last beat
-                else begin
-                    payload_q[beats_q*DATA_WIDTH +: DATA_WIDTH] <= in_r.data;
-                    beats_q      <= beats_inc;
-                    last_rresp_q <= in_r.resp;
-                end
 
-                // If last beat accepted, close burst
-                if (last_beat) begin
-                    collecting_q <= 1'b0;
-                end
+            // --------------------
+            // WRITE side (push)
+            // --------------------
+            if (push) begin
+                mem[wr_ptr_q].id   <= r_in.id;
+                mem[wr_ptr_q].data <= r_in.data;
+                mem[wr_ptr_q].resp <= r_in.resp;
+                mem[wr_ptr_q].last <= r_in.last;
+
+                // wr_ptr_q wrap-around
+                if (wr_ptr_q == (DEPTH-1)[PTR_W-1:0])
+                    wr_ptr_q <= '0;
+                else
+                    wr_ptr_q <= wr_ptr_q + {{(PTR_W-1){1'b0}}, 1'b1};
             end
-        end
-    end
 
-    // ===========================================================
-    // Whole-burst FIFO instantiation
-    // ===========================================================
-    fifo #(
-        .DATA_WIDTH (DATA_WIDTH),
-        .MAX_BEATS  (MAX_BEATS),
-        .DEPTH      (FIFO_DEPTH)
-    ) u_outresp_fifo (
-        .clk         (clk),
-        .rst         (rst),
-        .wr_en       (fifo_push),
-        .rd_en       (fifo_pop),
-        .alloc_gnt   (fifo_alloc_gnt),
-        .free_ack    (fifo_free_ack),
-
-        .din_kind    (din_kind),
-        .din_id      (din_id),
-        .din_addr    (din_addr),
-        .din_len     (din_len),
-        .din_size    (din_size),
-        .din_burst   (din_burst),
-        .din_qos     (din_qos),
-        .din_rresp   (din_rresp),
-        .din_nbeats  (din_nbeats),
-        .din_payload (din_payload),
-        .din_tag     (din_tag),
-
-        .dout_kind    (dout_kind),
-        .dout_id      (dout_id),
-        .dout_addr    (dout_addr),
-        .dout_len     (dout_len),
-        .dout_size    (dout_size),
-        .dout_burst   (dout_burst),
-        .dout_qos     (dout_qos),
-        .dout_rresp   (dout_rresp),
-        .dout_nbeats  (dout_nbeats),
-        .dout_payload (dout_payload),
-        .dout_tag     (dout_tag),
-
-        .empty        (fifo_empty),
-        .full         (fifo_full)
-    );
-
-    // ===========================================================
-    // Streaming stored bursts to AXI master
-    // ===========================================================
-    logic                sending_q;
-    logic [NBEATS_W-1:0] ob_idx_q;
-    logic [NBEATS_W-1:0] ob_last_idx;
-
-    assign ob_last_idx = (dout_nbeats - {{(NBEATS_W-1){1'b0}}, 1'b1});
-
-    // Start sending when idle and FIFO has data
-    wire can_start_send = (~sending_q) & (~fifo_empty);
-
-    // Beat handshake with master
-    wire beat_xfer = out_r.valid & out_r.ready;
-    wire at_last   = (ob_idx_q == ob_last_idx);
-
-    // Pop FIFO after last beat accepted
-    assign fifo_pop = beat_xfer & at_last;
-
-    // Drive out_r interface
-    always_comb begin
-        out_r.valid = sending_q;
-        out_r.id    = {ID_WIDTH{1'b0}};
-        out_r.data  = {DATA_WIDTH{1'b0}};
-        out_r.resp  = 2'b00;
-        out_r.last  = 1'b0;
-
-        if (sending_q) begin
-            out_r.valid = 1'b1;
-            out_r.id    = dout_id[ID_WIDTH-1:0];
-            out_r.data  = dout_payload[ob_idx_q*DATA_WIDTH +: DATA_WIDTH];
-            out_r.resp  = dout_rresp;
-            out_r.last  = (ob_idx_q == ob_last_idx);
-        end
-    end
-
-    // Sequential send state
-    always_ff @(posedge clk) begin
-        if (rst) begin
-            sending_q <= 1'b0;
-            ob_idx_q  <= {NBEATS_W{1'b0}};
-        end
-        else begin
-            if (can_start_send) begin
-                sending_q <= 1'b1;
-                ob_idx_q  <= {NBEATS_W{1'b0}};
+            // --------------------
+            // READ side (pop)
+            // --------------------
+            if (pop) begin
+                // rd_ptr_q wrap-around
+                if (rd_ptr_q == (DEPTH-1)[PTR_W-1:0])
+                    rd_ptr_q <= '0;
+                else
+                    rd_ptr_q <= rd_ptr_q + {{(PTR_W-1){1'b0}}, 1'b1};
             end
-            else if (beat_xfer) begin
-                if (at_last) begin
-                    sending_q <= 1'b0;
-                    ob_idx_q  <= {NBEATS_W{1'b0}};
-                end
-                else begin
-                    ob_idx_q  <= ob_idx_q + {{(NBEATS_W-1){1'b0}}, 1'b1};
-                end
+
+            // --------------------
+            // count_q update
+            // --------------------
+            if (push & (~pop)) begin
+                count_q <= count_q + {{(CNT_W-1){1'b0}}, 1'b1};
             end
+            else if ((~push) & pop) begin
+                count_q <= count_q - {{(CNT_W-1){1'b0}}, 1'b1};
+            end
+            // push & pop or neither → no change
         end
     end
 

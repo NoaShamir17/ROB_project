@@ -3,7 +3,6 @@ interface ar_if #(
     parameter ID_WIDTH    = 4,    // width of the AXI transaction ID field
     parameter ADDR_WIDTH  = 32,   // width of the memory address field
     parameter LEN_WIDTH   = 8,    // width of the burst length field
-    parameter TAG_WIDTH   = 4     // internal tag width used by our design
 );
 
     logic                  valid;    // gets asserted by the sender to say that the address/control info is valid
@@ -13,7 +12,6 @@ interface ar_if #(
     logic [2:0]            size;     // size of each beat (like 3'b011 = 8 bytes per beat)
     logic [1:0]            burst;    // tells how the address should behave across beats (like increment or fixed)
     logic [3:0]            qos;      // quality of service (optional, usually for arbitration)
-    logic [TAG_WIDTH-1:0]  tagid;    // an internal tag we use to help track or reorder inside the chip
     logic                  ready;    // receiver sets this high when it can accept a new transaction
 
     // modport for the sender side (master), this drives all the signals
@@ -25,7 +23,6 @@ interface ar_if #(
         output size,    // beat size (in bytes)
         output burst,   // burst type (like INCR or FIXED)
         output qos,     // QoS level (used for arbitration if needed)
-        output tagid,   // internal tag for tracking in our design
         input  ready    // sender listens to this to know if it can send
     );
 
@@ -38,7 +35,6 @@ interface ar_if #(
         input  size,    // gets the beat size
         input  burst,   // gets the burst type
         input  qos,     // gets the QoS hint
-        input  tagid,   // gets the internal tag
         output ready    // receiver tells sender it's ready to accept
     );
 

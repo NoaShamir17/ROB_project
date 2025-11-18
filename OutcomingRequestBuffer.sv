@@ -1,192 +1,161 @@
 // ============================================================================
-// OutcomingRequestBuffer
+// OutcomingRequestBuffer.sv
 // ----------------------------------------------------------------------------
-// • Input: AR request from internal logic (in_if)
-// • Output: AR channel to AXI slave (m_if)
-// • Policy: drain FIFO first; bypass only when FIFO empty
-// • Uses your whole-burst fifo (kind=0 for requests)
-// • Bitwise-only control (~, &, |) in comb logic
+// 8-entry FIFO for AXI AR requests on the outgoing side.
+//
+// ar_in  : AR from ar_id_ordering_unit (ar_if.receiver)
+// ar_out : AR to AXI slave             (ar_if.sender)
+//
+// Behavior:
+//   - When not full, ar_in.ready = 1 and we accept requests on
+//       ar_in.valid & ar_in.ready (push).
+//   - When not empty, ar_out.valid = 1 and we provide the oldest request.
+//       On ar_out.valid & ar_out.ready we pop that request.
+//
+// Control uses only bitwise &, |, ~ (no &&, ||, !).
 // ============================================================================
+
 module OutcomingRequestBuffer #(
-    parameter ID_WIDTH    = 4,     // AXI ID width (to slave)
-    parameter ADDR_WIDTH  = 32,    // Address width (to slave)
-    parameter LEN_WIDTH   = 8,     // AXI burst length width
-    parameter TAG_WIDTH   = 4,     // Internal tag width (passed through if you need it on ARUSER)
-    parameter FIFO_DEPTH  = 16,    // FIFO depth
-    // fifo payload sizing (ports exist but not used for AR)
-    parameter int DATA_WIDTH = 64,
-    parameter int MAX_BEATS  = 32
+    parameter int ID_WIDTH    = 4,
+    parameter int ADDR_WIDTH  = 32,
+    parameter int LEN_WIDTH   = 8,
+    parameter int SIZE_WIDTH  = 3,
+    parameter int BURST_WIDTH = 2,
+    parameter int QOS_WIDTH   = 4,
+    parameter int DEPTH       = 8
 )(
     input  logic clk,
-    input  logic rst,              // synchronous active-high for this block
+    input  logic rst,          // async, active-high
 
-    // From ar_ordering_unit (producer of AR requests)
-    ar_if.receiver in_if,
+    // AR from ar_id_ordering_unit
+    ar_if.receiver ar_in,
 
-    // To AXI slave (we act as master on AR channel)
-    ar_if.sender   m_if
+    // AR toward AXI slave
+    ar_if.sender   ar_out,
+
+    // NEW: explicit full indicator
+    output logic Outcoming_buffer_full
 );
 
-    localparam int NBEATS_W = $clog2(MAX_BEATS + 1);
+    // -------------------------------------------------------------
+    // One AR entry record — fully parametric
+    // -------------------------------------------------------------
+    typedef struct packed {
+        logic [ID_WIDTH-1:0]    id;
+        logic [ADDR_WIDTH-1:0]  addr;
+        logic [LEN_WIDTH-1:0]   len;
+        logic [SIZE_WIDTH-1:0]  size;
+        logic [BURST_WIDTH-1:0] burst;
+        logic [QOS_WIDTH-1:0]   qos;
+    } ar_entry_t;
 
-    // -----------------------------
-    // FIFO interface (whole-burst)
-    // -----------------------------
-    logic fifo_empty, fifo_full;
-    logic fifo_push, fifo_pop;
-    logic fifo_alloc_gnt, fifo_free_ack;
+    localparam int PTR_W = (DEPTH <= 2) ? 1 : $clog2(DEPTH);
+    localparam int CNT_W = $clog2(DEPTH + 1);
 
-    // Write-side to fifo (din_*): from in_if (kind=REQUEST)
-    logic        din_kind;
-    logic [7:0]  din_id;
-    logic [31:0] din_addr;
-    logic [7:0]  din_len;
-    logic [2:0]  din_size;
-    logic [1:0]  din_burst;
-    logic [3:0]  din_qos;
-    logic [1:0]  din_rresp;
-    logic [NBEATS_W-1:0] din_nbeats;
-    logic [MAX_BEATS*DATA_WIDTH-1:0] din_payload;
-    logic [7:0]  din_tag;
+    // FIFO storage
+    ar_entry_t            mem     [0:DEPTH-1];
+    logic [PTR_W-1:0]     wr_ptr_q;
+    logic [PTR_W-1:0]     rd_ptr_q;
+    logic [CNT_W-1:0]     count_q;
 
-    // Read-side from fifo (dout_*): drives m_if on pop
-    logic        dout_kind;
-    logic [7:0]  dout_id;
-    logic [31:0] dout_addr;
-    logic [7:0]  dout_len;
-    logic [2:0]  dout_size;
-    logic [1:0]  dout_burst;
-    logic [3:0]  dout_qos;
-    logic [1:0]  dout_rresp;
-    logic [NBEATS_W-1:0] dout_nbeats;
-    logic [MAX_BEATS*DATA_WIDTH-1:0] dout_payload;
-    logic [7:0]  dout_tag;
+    // Status flags
+    logic                 empty;
+    logic                 full;
 
-    // -----------------------------
-    // Output load policy
-    // -----------------------------
-    // Can load new AR into m_if when not holding one or slave is ready
-    wire can_load_out = (~m_if.valid) | (m_if.ready);
-
-    // Drain FIFO first; bypass only when FIFO empty and output can load
-    wire serve_fifo   = (~fifo_empty) & can_load_out;
-    wire serve_bypass = ( fifo_empty) & in_if.valid & can_load_out;
-
-    // -----------------------------
-    // Backpressure to producer
-    // -----------------------------
-    // Ready if we will bypass now OR FIFO has space
-    assign in_if.ready = serve_bypass | (~fifo_full);
-
-    // -----------------------------
-    // FIFO enables (bitwise)
-    // -----------------------------
-    assign fifo_push = in_if.valid & (~serve_bypass) & (~fifo_full);
-    assign fifo_pop  = serve_fifo;
-
-    // -----------------------------
-    // Drive fifo din_* from in_if (REQUEST entry, kind=0)
-    // -----------------------------
+    // -------------------------------------------------------------
+    // Empty / full
+    // -------------------------------------------------------------
     always_comb begin
-        din_kind    = 1'b0; // request
+        empty = (count_q == '0);
+        full  = (count_q == DEPTH[CNT_W-1:0]);
 
-        // widen to fifo port sizes
-        din_id      = {{(8-ID_WIDTH){1'b0}}, in_if.id};
-        din_addr    = in_if.addr[31:0];
-        din_len     = {{(8-LEN_WIDTH){1'b0}}, in_if.len};
-        din_size    = in_if.size;
-        din_burst   = in_if.burst;
-        din_qos     = in_if.qos;
-
-        din_rresp   = 2'b00;                 // not used for requests
-        din_nbeats  = {NBEATS_W{1'b0}};      // not used downstream on AR
-        din_payload = {MAX_BEATS*DATA_WIDTH{1'b0}}; // unused on AR
-
-        din_tag     = {{(8-TAG_WIDTH){1'b0}}, in_if.tagid};
+        // NEW: export full flag
+        Outcoming_buffer_full = full;
     end
 
-    // -----------------------------
-    // FIFO instance
-    // -----------------------------
-    fifo #(
-        .DATA_WIDTH (DATA_WIDTH),
-        .MAX_BEATS  (MAX_BEATS),
-        .DEPTH      (FIFO_DEPTH)
-    ) u_ar_fifo (
-        .clk         (clk),
-        .rst         (rst),          // fifo has async posedge; acceptable here
-        .wr_en       (fifo_push),
-        .rd_en       (fifo_pop),
-        .alloc_gnt   (fifo_alloc_gnt),
-        .free_ack    (fifo_free_ack),
-        .din_kind    (din_kind),
-        .din_id      (din_id),
-        .din_addr    (din_addr),
-        .din_len     (din_len),
-        .din_size    (din_size),
-        .din_burst   (din_burst),
-        .din_qos     (din_qos),
-        .din_rresp   (din_rresp),
-        .din_nbeats  (din_nbeats),
-        .din_payload (din_payload),
-        .din_tag     (din_tag),
+    // -------------------------------------------------------------
+    // Handshake and fire signals
+    // -------------------------------------------------------------
+    logic push;   // accept new request from upstream
+    logic pop;    // release request to downstream
 
-        .dout_kind    (dout_kind),
-        .dout_id      (dout_id),
-        .dout_addr    (dout_addr),
-        .dout_len     (dout_len),
-        .dout_size    (dout_size),
-        .dout_burst   (dout_burst),
-        .dout_qos     (dout_qos),
-        .dout_rresp   (dout_rresp),
-        .dout_nbeats  (dout_nbeats),
-        .dout_payload (dout_payload),
-        .dout_tag     (dout_tag),
+    // Upstream sees ready when not full
+    always_comb begin
+        ar_in.ready = ~full;
+    end
 
-        .empty       (fifo_empty),
-        .full        (fifo_full)
-    );
+    // Downstream sees valid when not empty
+    always_comb begin
+        ar_out.valid = ~empty;
+    end
 
-    // -----------------------------
-    // Drive AR to slave (m_if)
-    // -----------------------------
-    // Priority: serve FIFO, else bypass, else drop valid if consumed
-    always_ff @(posedge clk) begin
+    // Push/pop conditions (bitwise & only)
+    always_comb begin
+        push = ar_in.valid & ar_in.ready;
+        pop  = ar_out.valid & ar_out.ready;
+    end
+
+    // -------------------------------------------------------------
+    // Head entry → ar_out (combinational)
+    // -------------------------------------------------------------
+    always_comb begin
+        ar_out.id    = mem[rd_ptr_q].id;
+        ar_out.addr  = mem[rd_ptr_q].addr;
+        ar_out.len   = mem[rd_ptr_q].len;
+        ar_out.size  = mem[rd_ptr_q].size;
+        ar_out.burst = mem[rd_ptr_q].burst;
+        ar_out.qos   = mem[rd_ptr_q].qos;
+    end
+
+    // -------------------------------------------------------------
+    // Sequential update: write, read, count, pointers
+    // -------------------------------------------------------------
+    always_ff @(posedge clk or posedge rst) begin
         if (rst) begin
-            m_if.valid <= 1'b0;
-            m_if.id    <= '0;
-            m_if.addr  <= '0;
-            m_if.len   <= '0;
-            m_if.size  <= '0;
-            m_if.burst <= '0;
-            m_if.qos   <= '0;
-            m_if.tagid <= '0; // if your AR user/tag goes out; keep if needed
+            wr_ptr_q <= '0;
+            rd_ptr_q <= '0;
+            count_q  <= '0;
         end
         else begin
-            if (serve_fifo) begin
-                m_if.valid <= 1'b1;
-                m_if.id    <= dout_id[ID_WIDTH-1:0];
-                m_if.addr  <= {{(ADDR_WIDTH>32)?(ADDR_WIDTH-32):0{1'b0}}, dout_addr[31:0]};
-                m_if.len   <= dout_len[LEN_WIDTH-1:0];
-                m_if.size  <= dout_size;
-                m_if.burst <= dout_burst;
-                m_if.qos   <= dout_qos;
-                m_if.tagid <= dout_tag[TAG_WIDTH-1:0];
+
+            // --------------------
+            // WRITE side (push)
+            // --------------------
+            if (push) begin
+                mem[wr_ptr_q].id    <= ar_in.id;
+                mem[wr_ptr_q].addr  <= ar_in.addr;
+                mem[wr_ptr_q].len   <= ar_in.len;
+                mem[wr_ptr_q].size  <= ar_in.size;
+                mem[wr_ptr_q].burst <= ar_in.burst;
+                mem[wr_ptr_q].qos   <= ar_in.qos;
+
+                // wr_ptr wrap-around
+                if (wr_ptr_q == (DEPTH-1)[PTR_W-1:0])
+                    wr_ptr_q <= '0;
+                else
+                    wr_ptr_q <= wr_ptr_q + {{(PTR_W-1){1'b0}}, 1'b1};
             end
-            else if (serve_bypass) begin
-                m_if.valid <= 1'b1;
-                m_if.id    <= in_if.id;
-                m_if.addr  <= in_if.addr;
-                m_if.len   <= in_if.len;
-                m_if.size  <= in_if.size;
-                m_if.burst <= in_if.burst;
-                m_if.qos   <= in_if.qos;
-                m_if.tagid <= in_if.tagid;
+
+            // --------------------
+            // READ side (pop)
+            // --------------------
+            if (pop) begin
+                // rd_ptr wrap-around
+                if (rd_ptr_q == (DEPTH-1)[PTR_W-1:0])
+                    rd_ptr_q <= '0;
+                else
+                    rd_ptr_q <= rd_ptr_q + {{(PTR_W-1){1'b0}}, 1'b1};
             end
-            else if (m_if.valid & m_if.ready) begin
-                m_if.valid <= 1'b0;
+
+            // --------------------
+            // count_q update
+            // --------------------
+            if (push & (~pop)) begin
+                count_q <= count_q + {{(CNT_W-1){1'b0}}, 1'b1};
             end
-            // else: hold current AR until slave accepts
+            else if ((~push) & pop) begin
+                count_q <= count_q - {{(CNT_W-1){1'b0}}, 1'b1};
+            end
         end
     end
 

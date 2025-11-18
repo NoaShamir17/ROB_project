@@ -2,152 +2,169 @@
 // ar_id_ordering_unit.sv
 // ----------------------------------------------------------------------------
 // ROLE
-//   Single-entry AR (read-address) ordering stage between ar_in (receiver)
-//   and ar_out (sender). Accepts one request from ar_in, requests a Unique ID
-//   from the tag-map/allocator, and forwards the request to ar_out with the
-//   UNIQUE ID replacing the original AXI ID. Also drives ar_out.tagid with
-//   the same UNIQUE ID so downstream blocks can track it.
-//
-//   States (1 bit):
-//     • ST_REQ = 0 (IDLE)  : accept a new AR when tag-map not full
-//     • ST_GNT = 1 (ISSUE) : hold request; when alloc_gnt & ar_out handshake,
-//                            return to IDLE
-//
-// INTERFACES (ar_if):
-//   sender   : output valid,id,addr,len,size,burst,qos,tagid ; input ready
-//   receiver : input  valid,id,addr,len,size,burst,qos,tagid ; output ready
-//
-// POLICY
-//   • Bitwise only (& | ~), no && ||.
-//   • All AR fields here: valid, id, addr, len, size, burst, qos, tagid, ready.
-//   • unique_id (from tag-map) replaces original id on ar_out.id and ar_out.tagid.
-//   • ar_in.ready is gated with ~tag_map_full to avoid over-admitting.
-//
-// ----------------------------------------------------------------------------
-
+//   Ordering stage between ar_in and ar_out.
+//   • Captures one AR request.
+//   • Requests Unique ID from allocator.
+//   • When UID is granted, forwards request with:
+//       ar_out.id = unique_id
+//   • Holds output stable until downstream handshake.
+//   • Blocks new input when tag-map is full, out-buffer is full, or entry is
+//     occupied.
+// ============================================================================
 module ar_id_ordering_unit #(
-  parameter ID_WIDTH   = 4,
-  parameter ADDR_WIDTH = 32,
-  parameter LEN_WIDTH  = 8,   // typical AXI LEN field width
-  parameter USER_QOS_W = 4    // qos width (as provided by your ar_if)
+  parameter int ID_WIDTH    = 4,
+  parameter int ADDR_WIDTH  = 32,
+  parameter int LEN_WIDTH   = 8,
+  parameter int SIZE_WIDTH  = 3,
+  parameter int BURST_WIDTH = 2,
+  parameter int QOS_WIDTH   = 4
 )(
   input  logic clk,
   input  logic rst,
 
-  // Upstream (previous stage / master)
+  // Upstream (from IncomingRequestBuffer)
   ar_if.receiver ar_in,
 
-  // Downstream (next stage / slave)
+  // Downstream (to OutgoingRequestBuffer / slave)
   ar_if.sender   ar_out,
 
   // Tag-map / allocator handshake
-  output logic                alloc_req,      // request a Unique ID for held req
-  input  logic                alloc_gnt,      // allocator granted the Unique ID
-  output logic [ID_WIDTH-1:0] alloc_in_id,    // original ARID to be mapped
+  output logic                  alloc_req,        // request Unique ID
+  input  logic                  alloc_gnt,        // allocator granted Unique ID
+  output logic [ID_WIDTH-1:0]   alloc_in_id,      // original ID
 
-  // Unique ID from tag-map (used when alloc_gnt=1)
-  input  logic [ID_WIDTH-1:0] unique_id,
+  // Unique ID from allocator (valid when alloc_gnt == 1)
+  input  logic [ID_WIDTH-1:0]   unique_id,
 
-  // Backpressure: when tag-map is full, block new accepts
-  input  logic                tag_map_full
+  // Backpressure from tag-map (no more UID slots)
+  input  logic                  tag_map_full,
+
+  // Backpressure from OutcomingRequestBuffer (AR FIFO towards slave is full)
+  input  logic                  Outcoming_buffer_full
 );
 
-  // ==========================================================================
-  // STATE MACHINE: 1 bit (compact)
-  // ==========================================================================
-  localparam ST_REQ = 1'b0; // IDLE
-  localparam ST_GNT = 1'b1; // ISSUE
+  // ========================================================================
+  // STATE + FLAGS
+  // ========================================================================
+  localparam ST_REQ = 1'b0;   // idle, no request captured
+  localparam ST_GNT = 1'b1;   // have request, waiting UID and/or sending
+
   logic state_q, state_d;
 
-  // ==========================================================================
-  // LATCHED FIELDS (captured on ar_in handshake)
-  // ==========================================================================
-  logic [ID_WIDTH-1:0]   id_q;     // original AXI ID (for alloc_in_id visibility)
-  logic [ADDR_WIDTH-1:0] addr_q;
-  logic [LEN_WIDTH-1:0]  len_q;
-  logic [2:0]            size_q;
-  logic [1:0]            burst_q;
-  logic [USER_QOS_W-1:0] qos_q;
-  logic [ID_WIDTH-1:0]   tagid_q;  // captured from ar_in (not forwarded)
+  // Whether we already latched a Unique ID for the captured request
+  logic                 uid_valid_q;
+  logic                 uid_valid_d;
+  logic [ID_WIDTH-1:0]  uid_q;      // latched Unique ID
+  logic [ID_WIDTH-1:0]  uid_d;
 
-  // ==========================================================================
-  // HANDSHAKES (bitwise only)
-  // ==========================================================================
-  wire hs_in  = ar_in.valid  & ar_in.ready;   // accept from upstream
-  wire hs_out = ar_out.valid & ar_out.ready;  // present to downstream
+  // ========================================================================
+  // LATCHED AR FIELDS (from ar_in)
+  // ========================================================================
+  logic [ID_WIDTH-1:0]    id_q;
+  logic [ADDR_WIDTH-1:0]  addr_q;
+  logic [LEN_WIDTH-1:0]   len_q;
+  logic [SIZE_WIDTH-1:0]  size_q;
+  logic [BURST_WIDTH-1:0] burst_q;
+  logic [QOS_WIDTH-1:0]   qos_q;
+
+  // ========================================================================
+  // HANDSHAKES (pure wires)
+  // ========================================================================
+  wire hs_in  = ar_in.valid  & ar_in.ready;
+  wire hs_out = ar_out.valid & ar_out.ready;
   wire gnt    = alloc_gnt;
 
-  // ==========================================================================
-  // SEQ: STATE + CAPTURE
-  // ==========================================================================
-  always_ff @(posedge clk or posedge rst) begin
-    if (rst) begin
-      state_q <= ST_REQ;
+  // ========================================================================
+  // OUTPUTS / HANDSHAKES (pure assigns)
+  // ========================================================================
 
-      id_q     <= '0;
-      addr_q   <= '0;
-      len_q    <= '0;
-      size_q   <= '0;
-      burst_q  <= '0;
-      qos_q    <= '0;
-      tagid_q  <= '0;
+  // Upstream ready: only when idle, tag-map not full, and outgoing buffer not full
+  assign ar_in.ready =
+      (state_q == ST_REQ)
+    & (~tag_map_full)
+    & (~Outcoming_buffer_full);
+
+  // Allocator request / original ID
+  assign alloc_req   = (state_q == ST_GNT) & (~uid_valid_q);
+  assign alloc_in_id = id_q;
+
+  // Downstream valid: we have a captured request AND a valid UID
+  assign ar_out.valid = (state_q == ST_GNT) & uid_valid_q;
+
+  // AR payload toward downstream (combinational from latched regs)
+  assign ar_out.id    = uid_q;    // internal unique ID
+  assign ar_out.addr  = addr_q;
+  assign ar_out.len   = len_q;
+  assign ar_out.size  = size_q;
+  assign ar_out.burst = burst_q;
+  assign ar_out.qos   = qos_q;
+
+  // ========================================================================
+  // NEXT-STATE + UID LATCH LOGIC
+  // ========================================================================
+  always_comb begin
+    // default: hold values
+    state_d     = state_q;
+    uid_valid_d = uid_valid_q;
+    uid_d       = uid_q;
+
+    // ST_REQ: idle, no captured request
+    if (state_q == ST_REQ) begin
+      uid_valid_d = 1'b0;
+
+      // New request captured
+      if (hs_in) begin
+        state_d = ST_GNT;
+      end
     end
     else begin
-      state_q <= state_d;
+      // ST_GNT: we have a captured request
 
-      // Capture one AR when upstream handshake completes
+      // If we do not yet have UID and allocator grants one, latch it
+      if ((uid_valid_q == 1'b0) & gnt) begin
+        uid_d       = unique_id;
+        uid_valid_d = 1'b1;
+      end
+
+      // Once UID is valid and downstream accepts, return to idle
+      if (uid_valid_q & hs_out) begin
+        state_d     = ST_REQ;
+        uid_valid_d = 1'b0;
+      end
+    end
+  end
+
+  // ========================================================================
+  // SEQ: STATE + REGISTERS
+  // ========================================================================
+  always_ff @(posedge clk or posedge rst) begin
+    if (rst) begin
+      state_q     <= ST_REQ;
+      uid_valid_q <= 1'b0;
+      uid_q       <= '0;
+
+      id_q        <= '0;
+      addr_q      <= '0;
+      len_q       <= '0;
+      size_q      <= '0;
+      burst_q     <= '0;
+      qos_q       <= '0;
+    end
+    else begin
+      state_q     <= state_d;
+      uid_valid_q <= uid_valid_d;
+      uid_q       <= uid_d;
+
+      // Capture AR fields only when we handshake input
       if (hs_in) begin
-        id_q     <= ar_in.id;      // original ID (only for allocator visibility)
+        id_q     <= ar_in.id;
         addr_q   <= ar_in.addr;
         len_q    <= ar_in.len;
         size_q   <= ar_in.size;
         burst_q  <= ar_in.burst;
         qos_q    <= ar_in.qos;
-        tagid_q  <= ar_in.tagid;   // kept for debug/coverage if needed
       end
     end
   end
-
-  // ==========================================================================
-  // NEXT-STATE (purely combinational)
-  // ==========================================================================
-  always_comb begin
-    state_d = state_q;
-
-    if (state_q == ST_REQ) begin
-      // IDLE: accept a new request when ar_in.valid and we assert ar_in.ready
-      if (hs_in)
-        state_d = ST_GNT;
-    end
-    else begin
-      // ISSUE: wait for allocator grant and downstream acceptance
-      if (gnt & hs_out)
-        state_d = ST_REQ;
-    end
-  end
-
-  // ==========================================================================
-  // OUTPUTS / HANDSHAKES
-  // ==========================================================================
-  // Upstream READY: only IDLE and tag-map not full
-  assign ar_in.ready = (state_q == ST_REQ) & ~tag_map_full;
-
-  // Ask allocator while we are holding a request
-  assign alloc_req   = (state_q == ST_GNT);
-  assign alloc_in_id = id_q;                // tell allocator which original ID
-
-  // Present to downstream only when granted
-  assign ar_out.valid = (state_q == ST_GNT) & gnt;
-
-  // Replace original ID with Unique ID; also drive tagid with the Unique ID
-  assign ar_out.id     = unique_id;         // *** replaced ID ***
-  assign ar_out.tagid  = unique_id;         // *** propagate tag for tracking ***
-
-  // Forward remaining AR fields verbatim from the captured values
-  assign ar_out.addr   = addr_q;
-  assign ar_out.len    = len_q;
-  assign ar_out.size   = size_q;
-  assign ar_out.burst  = burst_q;
-  assign ar_out.qos    = qos_q;
 
 endmodule
