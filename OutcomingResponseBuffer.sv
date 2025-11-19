@@ -30,8 +30,6 @@ module OutcomingResponseBuffer #(
     // R towards AXI master
     r_if.sender   r_out,
 
-    // NEW: explicit full indicator
-    output logic OutcomingResponse_buffer_full
 );
 
     // -------------------------------------------------------------
@@ -64,8 +62,6 @@ module OutcomingResponseBuffer #(
         empty = (count_q == '0);
         full  = (count_q == DEPTH[CNT_W-1:0]);
 
-        // export full flag
-        OutcomingResponse_buffer_full = full;
     end
 
     // -------------------------------------------------------------

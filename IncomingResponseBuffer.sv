@@ -30,8 +30,6 @@ module IncomingResponseBuffer #(
     // R toward r_id_ordering_unit
     r_if.sender   r_out,
 
-    // NEW: explicit full indicator
-    output logic IncomingResponse_buffer_full
 );
 
     // -------------------------------------------------------------
@@ -63,9 +61,6 @@ module IncomingResponseBuffer #(
     always_comb begin
         empty = (count_q == '0);
         full  = (count_q == DEPTH[CNT_W-1:0]);
-
-        // export full flag
-        IncomingResponse_buffer_full = full;
     end
 
     // -------------------------------------------------------------

@@ -33,8 +33,6 @@ module OutcomingRequestBuffer #(
     // AR toward AXI slave
     ar_if.sender   ar_out,
 
-    // NEW: explicit full indicator
-    output logic Outcoming_buffer_full
 );
 
     // -------------------------------------------------------------
@@ -69,8 +67,6 @@ module OutcomingRequestBuffer #(
         empty = (count_q == '0);
         full  = (count_q == DEPTH[CNT_W-1:0]);
 
-        // NEW: export full flag
-        Outcoming_buffer_full = full;
     end
 
     // -------------------------------------------------------------

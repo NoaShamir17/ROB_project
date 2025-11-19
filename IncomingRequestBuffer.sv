@@ -32,9 +32,6 @@ module IncomingRequestBuffer #(
 
     // AR toward ar_id_ordering_unit
     ar_if.sender   ar_out,
-
-    // NEW: explicit full indicator for top module
-    output logic Incoming_buffer_full
 );
 
     // -------------------------------------------------------------
@@ -68,9 +65,6 @@ module IncomingRequestBuffer #(
     always_comb begin
         empty = (count_q == '0);
         full  = (count_q == DEPTH[CNT_W-1:0]);
-
-        // NEW: export full flag upward
-        Incoming_buffer_full = full;
     end
 
     // -------------------------------------------------------------

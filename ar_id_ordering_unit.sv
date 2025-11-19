@@ -37,10 +37,7 @@ module ar_id_ordering_unit #(
   input  logic [ID_WIDTH-1:0]   unique_id,
 
   // Backpressure from tag-map (no more UID slots)
-  input  logic                  tag_map_full,
-
-  // Backpressure from OutcomingRequestBuffer (AR FIFO towards slave is full)
-  input  logic                  Outcoming_buffer_full
+  input  logic                  tag_map_full
 );
 
   // ========================================================================
@@ -82,7 +79,7 @@ module ar_id_ordering_unit #(
   assign ar_in.ready =
       (state_q == ST_REQ)
     & (~tag_map_full)
-    & (~Outcoming_buffer_full);
+    & (ar_out.ready);
 
   // Allocator request / original ID
   assign alloc_req   = (state_q == ST_GNT) & (~uid_valid_q);
