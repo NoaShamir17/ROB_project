@@ -197,7 +197,7 @@ module id_allocate_and_restore_unit #(
     // ---------------------------------------------------------------------
     // sequential: registers update
     // ---------------------------------------------------------------------
-    always_ff @(posedge clk) begin
+    always_ff @(posedge clk or posedge rst) begin
         if (rst) begin
             row_is_bound_current <= '0;
             tot_used_count_current <= '0;
