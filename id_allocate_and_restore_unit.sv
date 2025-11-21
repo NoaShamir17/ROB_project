@@ -1,8 +1,8 @@
 module id_allocate_and_restore_unit #(
     parameter int ID_WIDTH = 4,
     parameter int MAX_OUTSTANDING = 16,
-    parameter int NUM_ROWS = $bits(MAX_OUTSTANDING),
-    parameter int NUM_COLS = $bits(MAX_OUTSTANDING)
+    parameter int NUM_ROWS = $clog2(MAX_OUTSTANDING),
+    parameter int NUM_COLS = $clog2(MAX_OUTSTANDING)
 )(
     input  logic                 clk,
     input  logic                 rst, // synchronous active-high
@@ -12,27 +12,28 @@ module id_allocate_and_restore_unit #(
     input  logic [ID_WIDTH-1:0]  in_orig_id,
     output logic                 alloc_gnt,
     output logic [ID_WIDTH-1:0]     unique_id,
-    output logic                 id_matrix_full, //TODO: check if needed - if so, implement
+    output logic                 id_matrix_full, 
 
     // free interface
     input  logic                 free_req,
     input  logic [ID_WIDTH-1:0]  unique_id_to_free,
     output logic [ID_WIDTH-1:0]  restored_id,
-    output logic                 free_ack
+    //output logic                 free_ack
 );
-    localparam int ROW_W = $bits(NUM_ROWS);
-    localparam int COL_W = $bits(NUM_COLS);
-    localparam int PER_ROW_CNT_W = $bits(NUM_COLS+1);
-    localparam int TOT_REQ_CNT_W = $bits(MAX_OUSTSTANDING + 1);
+    localparam int ROW_W = $clog2(NUM_ROWS);
+    localparam int COL_W = $clog2(NUM_COLS);
+    localparam int PER_ROW_CNT_W = $clog2(NUM_COLS+1); //width of per-row outstanding-request counter
+    localparam int TOT_REQ_CNT_W = $clog2(MAX_OUSTSTANDING + 1); //width of total outstanding-request counter
 
-    logic [ID_WIDTH-1:0]       id_matrix [NUM_ROWS][NUM_COLS];
+    logic [ID_WIDTH-1:0]       id_matrix [NUM_ROWS][NUM_COLS]; // ID matrix storage 
+                                                                //id_matrix[r][c] holds the original ID of the allocated unique ID {r,c}
     logic                      id_matrix_we [NUM_ROWS][NUM_COLS]; // write-enable for id matrix (single entry on alloc)
 
     // ---------------------------------------------------------------------
     // state of each row in id matrix
     // (bound means row is bound to some original ID)
     // ---------------------------------------------------------------------
-    logic [NUM_ROWS-1:0]        row_is_bound_current, row_is_bound_next; // row is bound to some original ID
+    logic [NUM_ROWS-1:0]        row_is_bound_current, row_is_bound_next; // row_is_bound_current[r] = 1 means row r is bound
     logic [ID_WIDTH-1:0]        bound_orig_id_current [NUM_ROWS];     // original ID bound to each row
     logic [ID_WIDTH-1:0]        bound_orig_id_next [NUM_ROWS];
 
@@ -60,14 +61,14 @@ module id_allocate_and_restore_unit #(
     logic [NUM_ROWS-1:0] row_bound_to_in_id; // index of row bound to in_orig_id is high
     logic             have_unbound_row; // is there any unbound row
     logic [ROW_W-1:0] first_unbound_row_idx; // index of first unbound row (if any)
-    logic [NUM_ROWS-1:0] first_unbound_row; // index of first unbound row is high
+    logic [NUM_ROWS-1:0] first_unbound_row; // index of first unbound row is high 
     logic [ROW_W-1:0] chosen_row_idx;
     logic [COL_W-1:0] chosen_col_idx;
 
         
     // allocation signals
     assign alloc_gnt = alloc_req & (have_row_hit | have_unbound_row) & ~id_matrix_full;
-    assign unique_id = {(ID_WIDTH-ROW_W-COL_W){1'b0},chosen_row_idx, chosen_col_idx};//unique_id is zero-padded to ID_WIDTH
+    assign unique_id = {{(ID_WIDTH-ROW_W-COL_W){1'b0}},chosen_row_idx, chosen_col_idx};//unique_id is zero-padded to ID_WIDTH
 
     // slot selection combinational logic
     always_comb begin : slot_selection_logic
@@ -114,7 +115,7 @@ module id_allocate_and_restore_unit #(
         end
 
         have_row_hit = |row_bound_to_in_id;
-        have_unbound_row = |row_is_bound_current;
+        have_unbound_row = ~&row_is_bound_current;
         chosen_row_idx = have_row_hit ? hit_row_idx : first_unbound_row_idx;
         chosen_col_idx = available_col_current[chosen_row_idx];
 
@@ -127,12 +128,8 @@ module id_allocate_and_restore_unit #(
             end
 
             // update available col pointer
-            if(available_col_current[chosen_row_idx] == (NUM_COLS - 1)) begin
-                available_col_next[chosen_row_idx] = '0;
-            end
-            else begin
-                available_col_next[chosen_row_idx] = available_col_current[chosen_row_idx] + COL_W'(1);
-            end
+            //notice that available_cil_next will wrap around automatically due to bitwidth
+            available_col_next[chosen_row_idx] = available_col_current[chosen_row_idx] + COL_W'(1);
 
             // set id matrix write enable
             id_matrix_we[chosen_row_idx][chosen_col_idx] = 1'b1;
@@ -145,7 +142,7 @@ module id_allocate_and_restore_unit #(
 
 
     // ---------------------------------------------------------------------
-    // free logic
+    // free id logic
     // ---------------------------------------------------------------------
 
     // decode unique_id_to_free
@@ -154,15 +151,15 @@ module id_allocate_and_restore_unit #(
 
     assign free_row_idx = unique_id_to_free[ROW_W+COL_W-1 : COL_W];
     assign free_col_idx = unique_id_to_free[COL_W-1 : 0];
-    assign restored_id = free_req ? id_matrix[free_row_idx][free_col_idx] : '0;
+    assign restored_id = id_matrix[free_row_idx][free_col_idx];
 
     always_comb begin : free_logic
         // default
-        free_ack    = 1'b0; // registered in always_ff below (mirror)
+        //free_ack    = 1'b0; // registered in always_ff below (mirror)
 
         // on free request, update state
         if (free_req) begin
-            free_ack = 1'b1;
+            //free_ack = 1'b1;
 
             // if this was the last outstanding in the row, unbind the row
             if (used_count_current[free_row_idx] == PER_ROW_CNT_W'(1)) begin
@@ -183,7 +180,6 @@ module id_allocate_and_restore_unit #(
         for (int r = 0; r < NUM_ROWS; r++) begin
             used_count_next[r]     = used_count_current[r];
         end
-
         // on alloc grant, increment counters
         if (alloc_gnt) begin
             tot_used_count_next = tot_used_count_current + TOT_REQ_CNT_W'(1);
@@ -211,10 +207,8 @@ module id_allocate_and_restore_unit #(
                 used_count_current[r]    <= '0;
                 for (int c = 0; c < NUM_COLS; c++) begin
                     id_matrix[r][c] <= '0;
-                    id_matrix_we[r][c] <= 1'b0;
                 end
             end
-            free_ack <= 1'b0;
         end else begin
             row_is_bound_current <= row_is_bound_next;
             tot_used_count_current <= tot_used_count_next;
@@ -231,7 +225,6 @@ module id_allocate_and_restore_unit #(
             end
 
             // simple free handshake mirror
-            free_ack <= free_req;
         end
     end
 

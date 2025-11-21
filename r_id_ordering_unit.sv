@@ -55,7 +55,6 @@ module r_id_ordering_unit #(
 
     // ---------------- Incoming response ----------------
     input  logic                 resp_valid,
-    input  logic [UID_W-1:0]     resp_uid,      // {row,col} from allocator
     r_if.receiver                r_in,          // metadata of incoming response
 
     // ---------------- Outgoing response ----------------
@@ -88,8 +87,8 @@ module r_id_ordering_unit #(
     logic waiting_map [NUM_ROWS][NUM_COLS];
 
     // Decode uid
-    wire [ROW_W-1:0] resp_row = resp_uid[UID_W-1:COL_W];
-    wire [COL_W-1:0] resp_col = resp_uid[COL_W-1:0];
+    wire [ROW_W-1:0] resp_row = r_in.id[UID_W-1:COL_W];
+    wire [COL_W-1:0] resp_col = r_in.id[COL_W-1:0];
 
 
     // ---------------- Allocator interaction ----------------
@@ -104,12 +103,12 @@ module r_id_ordering_unit #(
 
     logic direct_hit;   // freshly arrived response is in-order
     logic wm_hit;       // some waiting response is in-order
-    logic [UID_W-1:0] wm_hit_uid; // first waiting candidate (priority encode)
+    logic [ID_WIDTH-1:0] wm_hit_uid; // first waiting candidate (priority encode)
     logic [NUM_ROWS-1:0] wm_hit_vec; // one-hot per row if that row has a hit
     logic [NUM_ROWS-1:0] wm_first_row; // vector marking first row with a hit (only one bit set to 1)
-
+    logic [ID_WIDTH-1:0] wm_uid [NUM_ROWS-1:0]; // uid per row for hit checking
     //check if direct hit
-    assign direct_hit = resp_valid & ~|(resp_col ^ release_idx[resp_row]);
+    assign direct_hit = resp_valid & ~|(resp_col ^ release_idx[resp_row]); // direct hit if resp_col matches release_idx of that row
     
 
     //check if waiting memory has a hit
@@ -120,12 +119,15 @@ module r_id_ordering_unit #(
 
         for (r = 0; r < NUM_ROWS; r++) begin : GEN_WM_HIT_VEC
             wm_hit_vec[r] = waiting_map[r][release_idx[r]];
+            //TODO: add if(r==0) bc r-1 is invalid
             wm_first_row[r] = wm_hit_vec[r] & ~|wm_hit_vec[r-1:0];
-            if (wm_first_row[r]) begin
+
+            wm_uid[r] = {r[ROW_W-1:0], release_idx[r]};
                 // only one bit is set in wm_first_row
                 // so we can use it to get the first row with a hit
-                wm_hit_uid = {r[ROW_W-1:0], release_idx[r]};
-            end
+                //wm_hit_uid = {r[ROW_W-1:0], release_idx[r]};
+            wm_hit_uid = wm_hit_uid | (wm_uid[r] & {UID_W{wm_first_row[r]}});
+
         end 
     end
 
@@ -165,7 +167,7 @@ module r_id_ordering_unit #(
             r_out.last      = r_in.last;
             r_out.tagid     = r_in.tagid;
             free_req        = 1'b1; //TODO: input to allocator
-            free_uid        = resp_uid; //TODO: input to allocator
+            free_uid        = r_in.id; //TODO: input to allocator
 
         end else if (wm_hit) begin
             release_valid   = 1'b1;
@@ -183,7 +185,6 @@ module r_id_ordering_unit #(
         end else if (resp_valid & !direct_hit & !wm_full) begin
             // Out-of-order arrival → store in waiting memory
             wm_write_en  = 1'b1;
-            wm_write_uid = resp_uid;
             wm_write_data.valid = 1'b1;
             wm_write_data.id    = r_in.id;
             wm_write_data.data  = r_in.data;
