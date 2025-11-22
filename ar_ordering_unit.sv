@@ -1,5 +1,5 @@
 // ============================================================================
-// ar_id_ordering_unit.sv
+// ar_ordering_unit.sv
 // ----------------------------------------------------------------------------
 // ROLE
 //   Ordering stage between ar_in and ar_out.
@@ -11,7 +11,7 @@
 //   • Blocks new input when tag-map is full, out-buffer is full, or entry is
 //     occupied.
 // ============================================================================
-module ar_id_ordering_unit #(
+module ar_ordering_unit #(
   parameter int ID_WIDTH    = 4,
   parameter int ADDR_WIDTH  = 32,
   parameter int LEN_WIDTH   = 8,
@@ -22,7 +22,7 @@ module ar_id_ordering_unit #(
   input  logic clk,
   input  logic rst,
 
-  // Upstream (from IncomingRequestBuffer)
+  // Upstream (from incoming_request_buffer)
   ar_if.receiver ar_in,
 
   // Downstream (to OutgoingRequestBuffer / slave)

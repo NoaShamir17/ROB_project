@@ -7,8 +7,8 @@
 //
 // Component Flow:
 // 1. AXI Master (axi_ar_in) -> incoming_request_buffer
-// 2. incoming_request_buffer -> ar_id_ordering_unit (gets UID from allocator)
-// 3. ar_id_ordering_unit -> outgoing_request_buffer
+// 2. incoming_request_buffer -> ar_ordering_unit (gets UID from allocator)
+// 3. ar_ordering_unit -> outgoing_request_buffer
 // 4. outgoing_request_buffer -> AXI Slave (axi_ar_out)
 //
 // 5. AXI Slave (axi_r_in) -> incoming_response_buffer
@@ -16,14 +16,14 @@
 // 7. r_id_ordering_unit -> outgoing_response_buffer (releases ordered data)
 // 8. outgoing_response_buffer -> AXI Master (axi_r_out)
 //
-// Allocator (allocator_tag_map) is shared by ar_id_ordering_unit (alloc) and
+// Allocator (allocator_tag_map) is shared by ar_ordering_unit (alloc) and
 // r_id_ordering_unit (free + restored ID lookup).
 
 //TODO: match all r_if and ar_if
 //TODO: implement everything marked as TODO in the code below
 //TODO: count how many cycles it takes for a request to go from axi_ar_in to axi_ar_out
 //TODO: count how many cycles it takes for a response to go from axi_r_in to axi_r_out
-//TODO: check if r_id_ordering_unit needs FSM like ar_id_ordering_unit
+//TODO: check if r_id_ordering_unit needs FSM like ar_ordering_unit
 //TODO: add the "last" signal to response_park and every where it's missing and check what happens with multi-beat requests/responses
 // ============================================================================
 module top #(
@@ -56,16 +56,16 @@ module top #(
     // ---------------------------
     // Internal interface instances
     // ---------------------------
-    // ic_req: AXI AR after incoming_request_buffer -> input to ar_id_ordering_unit
+    // ic_req: AXI AR after incoming_request_buffer -> input to ar_ordering_unit
     ar_if #(
         .ID_WIDTH(ID_WIDTH),
         .ADDR_WIDTH(ADDR_WIDTH),
         .LEN_WIDTH($clog2(MAX_LEN)) // TODO: confirm ar_if.len width param name/size
     ) ic_req_if ();
 
-    // oc_req: output of ar_id_ordering_unit -> outgoing_request_buffer -> axi_ar_out
+    // oc_req: output of ar_ordering_unit -> outgoing_request_buffer -> axi_ar_out
     ar_if #(
-        .ID_WIDTH(ID_WIDTH),        // TODO: ar_id_ordering_unit will write UID into id field: confirm width expectations (may need UID_W)
+        .ID_WIDTH(ID_WIDTH),        // TODO: ar_ordering_unit will write UID into id field: confirm width expectations (may need UID_W)
         .ADDR_WIDTH(ADDR_WIDTH),
         .LEN_WIDTH($clog2(MAX_LEN))
     ) oc_req_if ();
@@ -164,8 +164,8 @@ module top #(
         .out_if  (axi_ar_out)
     );
 
-    // ar_id_ordering_unit: get UIDs from allocator; s_ar = ic_req_if, m_ar = oc_req_if
-    ar_id_ordering_unit #(
+    // ar_ordering_unit: get UIDs from allocator; s_ar = ic_req_if, m_ar = oc_req_if
+    ar_ordering_unit #(
         .ID_WIDTH(ID_WIDTH),
         .MAX_OUTSTANDING(MAX_OUTSTANDING)
         // TODO: add other params (UID width etc.) if module defines them

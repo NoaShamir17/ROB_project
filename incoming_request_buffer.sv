@@ -30,7 +30,7 @@ module incoming_request_buffer #(
     // AR from AXI master
     ar_if.receiver ar_in,
 
-    // AR toward ar_id_ordering_unit
+    // AR toward ar_ordering_unit
     ar_if.sender   ar_out,
 );
 

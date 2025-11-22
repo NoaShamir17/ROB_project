@@ -3,7 +3,7 @@
 // ----------------------------------------------------------------------------
 // 8-entry FIFO for AXI AR requests on the outgoing side.
 //
-// ar_in  : AR from ar_id_ordering_unit (ar_if.receiver)
+// ar_in  : AR from ar_ordering_unit (ar_if.receiver)
 // ar_out : AR to AXI slave             (ar_if.sender)
 //
 // Behavior:
@@ -27,7 +27,7 @@ module outgoing_request_buffer #(
     input  logic clk,
     input  logic rst,          // async, active-high
 
-    // AR from ar_id_ordering_unit
+    // AR from ar_ordering_unit
     ar_if.receiver ar_in,
 
     // AR toward AXI slave
