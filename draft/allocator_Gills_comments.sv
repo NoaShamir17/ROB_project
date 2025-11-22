@@ -2,7 +2,7 @@
 Commented code by Gil - look for "GIL ERROR"
 =======================
 
-module id_allocate_and_restore_unit #(
+module allocator #(
     parameter int ID_WIDTH = 4,
     parameter int MAX_OUTSTANDING = 16,
     parameter int NUM_ROWS = $clog2(MAX_OUTSTANDING), // GIL ERROR - MaxOutstanding is a value already, not a vector. As a vector it is 32bits wide...
@@ -248,7 +248,7 @@ endmodule
 =========================================
 OLD CODE:
 =========================================
-module id_allocate_and_restore_unit #(
+module allocator #(
     parameter int ID_WIDTH = 4,
     parameter int MAX_OUTSTANDING = 16,
     parameter int NUM_ROWS = $bits(MAX_OUTSTANDING),
