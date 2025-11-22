@@ -1,4 +1,4 @@
-// module row_col_assign #(
+// module row_col_assign_rename #(
 //     parameter ID_WIDTH        = 4,    // AXI ID width (orig ID width)
 //     parameter MAX_OUTSTANDING = 16    // Number of slots to manage (N)
 // )(
@@ -142,7 +142,7 @@
 // - Reuses a row per original ID (if any column of that row is still busy, the row "belongs" to that ID)
 // - Each row has a bitmap of used/free columns to track outstanding transactions
 // - A (row,col) -> original ID tag_map lets us restore the original ID when freeing
-module row_col_assign #(
+module row_col_assign_rename #(
     parameter int ID_WIDTH = 4,     // Width of the ORIGINAL AXI ID (as seen on ARID/RID)
     // Choose a matrix geometry: total capacity = NUM_ROWS * NUM_COLS
     parameter int NUM_ROWS = 4,     // Number of distinct rows (each row binds to one original ID while used)
@@ -347,11 +347,11 @@ end
 endmodule
 
 
-    
 
 
 
 
 
-    
+
+
 
