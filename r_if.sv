@@ -3,7 +3,6 @@ interface r_if #(
     parameter ID_WIDTH    = 4,    // width of the transaction ID
     parameter DATA_WIDTH  = 64,   // width of the data bus
     parameter RESP_WIDTH  = 2,    // width of the response field (usually 2 bits)
-    parameter TAG_WIDTH   = 4     // internal tag used for routing or tracking
 );
 
     logic                  valid;              // high means this beat of data is valid

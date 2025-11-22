@@ -3,15 +3,18 @@ interface ar_if #(
     parameter ID_WIDTH    = 4,    // width of the AXI transaction ID field
     parameter ADDR_WIDTH  = 32,   // width of the memory address field
     parameter LEN_WIDTH   = 8,    // width of the burst length field
+    parameter SIZE_WIDTH  = 3,    // width of the burst size field
+    parameter BURST_WIDTH = 2,    // width of the burst type field
+    parameter QOS_WIDTH   = 4     // width of the quality of service field
 );
 
     logic                  valid;    // gets asserted by the sender to say that the address/control info is valid
     logic [ID_WIDTH-1:0]   id;       // transaction ID for tracking requests/responses
     logic [ADDR_WIDTH-1:0] addr;     // the memory address where we want to read from
     logic [LEN_WIDTH-1:0]  len;      // how many beats (transfers) in this burst
-    logic [2:0]            size;     // size of each beat (like 3'b011 = 8 bytes per beat)
-    logic [1:0]            burst;    // tells how the address should behave across beats (like increment or fixed)
-    logic [3:0]            qos;      // quality of service (optional, usually for arbitration)
+    logic [SIZE_WIDTH-1:0]   size;     // size of each beat (like 3'b011 = 8 bytes per beat)
+    logic [BURST_WIDTH-1:0]  burst;    // tells how the address should behave across beats (like increment or fixed)
+    logic [QOS_WIDTH-1:0]    qos;      // quality of service (optional, usually for arbitration)
     logic                  ready;    // receiver sets this high when it can accept a new transaction
 
     // modport for the sender side (master), this drives all the signals
