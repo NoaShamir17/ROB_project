@@ -47,6 +47,15 @@ module r_id_ordering_unit #(
     logic waiting_map [NUM_ROWS][NUM_COLS];
     logic [BEAT_CNT_W-1:0] waiting_beats_count [NUM_ROWS][NUM_COLS];
 
+    genvar row, col;
+    generate
+        for (row = 0; row < NUM_ROWS; row = row + 1) begin : gen_waiting_map_row
+            for (col = 0; col < NUM_COLS; col = col + 1) begin : gen_waiting_map_col
+                waiting_map[row][col] = |(waiting_beats_count[row][col] ^ {BEAT_CNT_W{1'b0}}); // high when beats count is non-zero
+            end
+        end
+    endgenerate
+
 
     // Decode uid
     logic [ROW_W-1:0] resp_row = r_in.id[ID_WIDTH-1:COL_W];
@@ -68,7 +77,10 @@ module r_id_ordering_unit #(
     
     //----------direct hit logic----------
     // direct hit if resp_col matches release_idx of that row
-    assign direct_hit = r_in.valid & ~|(resp_col ^ release_idx[resp_row]); // direct hit if resp_col matches release_idx of that row
+    // AND if not waiting in rm (no earlier beats pending)
+    assign direct_hit = r_in.valid & 
+                         ~|(resp_col ^ release_idx[resp_row]) &
+                         ~waiting_map[resp_row][resp_col]; // direct hit if resp_col matches release_idx of that row
     
 
     //----------waiting memory hit logic----------
@@ -132,16 +144,17 @@ module r_id_ordering_unit #(
         rm_release_uid = '0;
 
         // response output signals
-        r_out.id        = '0;//TODO: do X's
-        r_out.data      = '0;
-        r_out.resp      = '0;
-        r_out.last      = 1'b0;
+        // default to X so simulation can catch incorrect use (x-propagation)
+        r_out.id        = 'x;               // sized to ID_WIDTH, all bits X
+        r_out.data      = 'x;               // sized to data width, all bits X
+        r_out.resp      = 'x;               // sized to resp width, all bits X
+        r_out.last      = 1'bx;             // single-bit X
 
         // response memory store signals
-        r_store.id      = '0;
-        r_store.data    = '0;
-        r_store.resp    = '0;
-        r_store.last    = 1'b0;
+        r_store.id      = 'x;               // sized to ID_WIDTH
+        r_store.data    = 'x;
+        r_store.resp    = 'x;
+        r_store.last    = 1'bx;
         //----------------------------------------------------------
 
         // ---------------- Release logic ---------------------
@@ -207,25 +220,28 @@ module r_id_ordering_unit #(
             for (int r = 0; r < NUM_ROWS; r++) begin
                 release_idx[r] <= '0;
                 for (int c = 0; c < NUM_COLS; c++)
-                    waiting_map[r][c] <= 1'b0;
+                    waiting_beats_count[r][c] <= '0;
             end
         end else begin
             if (hs_out) begin
                 //handshake on output - update pointers and waiting map
-                if (direct_hit) begin
+                if (direct_hit & hs_in) begin
                     // Increment release pointer for that row 
                     // wrap-around handled by bit-width
                     release_idx[resp_row] <= release_idx[resp_row] + 1'b1;
                 end
-                else if (rm_hit) begin
-                    waiting_map[rm_row][rm_col] <= 1'b0;
+                else if (rm_hit & hs_release) begin
+                    // Increment release pointer for that row 
                     release_idx[rm_row] <= release_idx[rm_row] + 1'b1;
+                    // Decrement waiting beats count for that entry
+                    waiting_beats_count[resp_row][resp_col] <= waiting_beats_count[resp_row][resp_col] - 1'b1;
                 end
             end
 
             // Mark waiting entry on store
             if (hs_store) begin
-                waiting_map[resp_row][resp_col] <= 1'b1;
+                // Increment waiting beats count for that entry
+                waiting_beats_count[resp_row][resp_col] <= waiting_beats_count[resp_row][resp_col] + 1'b1;
             end
         end
     end
