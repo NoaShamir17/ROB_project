@@ -1,10 +1,10 @@
 // ============================================================================
-// OutcomingRequestBuffer.sv
+// incoming_request_buffer.sv
 // ----------------------------------------------------------------------------
-// 8-entry FIFO for AXI AR requests on the outgoing side.
+// 8-entry FIFO for AXI AR requests.
 //
-// ar_in  : AR from ar_id_ordering_unit (ar_if.receiver)
-// ar_out : AR to AXI slave             (ar_if.sender)
+// ar_in  : AR from master      (ar_if.receiver)
+// ar_out : AR to ordering unit (ar_if.sender)
 //
 // Behavior:
 //   - When not full, ar_in.ready = 1 and we accept requests on
@@ -15,28 +15,27 @@
 // Control uses only bitwise &, |, ~ (no &&, ||, !).
 // ============================================================================
 
-module OutcomingRequestBuffer #(
-    parameter int ID_WIDTH    = 4,
+module incoming_request_buffer #(
+    parameter int ID_WIDTH    = 8,
     parameter int ADDR_WIDTH  = 32,
     parameter int LEN_WIDTH   = 8,
     parameter int SIZE_WIDTH  = 3,
     parameter int BURST_WIDTH = 2,
     parameter int QOS_WIDTH   = 4,
-    parameter int DEPTH       = 8
+    parameter int DEPTH       = 8      // number of AR entries stored
 )(
     input  logic clk,
     input  logic rst,          // async, active-high
 
-    // AR from ar_id_ordering_unit
+    // AR from AXI master
     ar_if.receiver ar_in,
 
-    // AR toward AXI slave
+    // AR toward ar_id_ordering_unit
     ar_if.sender   ar_out,
-
 );
 
     // -------------------------------------------------------------
-    // One AR entry record — fully parametric
+    // One AR entry record
     // -------------------------------------------------------------
     typedef struct packed {
         logic [ID_WIDTH-1:0]    id;
@@ -51,14 +50,14 @@ module OutcomingRequestBuffer #(
     localparam int CNT_W = $clog2(DEPTH + 1);
 
     // FIFO storage
-    ar_entry_t            mem     [0:DEPTH-1];
-    logic [PTR_W-1:0]     wr_ptr_q;
-    logic [PTR_W-1:0]     rd_ptr_q;
-    logic [CNT_W-1:0]     count_q;
+    ar_entry_t        mem     [0:DEPTH-1];
+    logic [PTR_W-1:0] wr_ptr_q;
+    logic [PTR_W-1:0] rd_ptr_q;
+    logic [CNT_W-1:0] count_q;
 
     // Status flags
-    logic                 empty;
-    logic                 full;
+    logic             empty;
+    logic             full;
 
     // -------------------------------------------------------------
     // Empty / full
@@ -66,23 +65,22 @@ module OutcomingRequestBuffer #(
     always_comb begin
         empty = (count_q == '0);
         full  = (count_q == DEPTH[CNT_W-1:0]);
-
     end
 
     // -------------------------------------------------------------
     // Handshake and fire signals
     // -------------------------------------------------------------
-    logic push;   // accept new request from upstream
-    logic pop;    // release request to downstream
+    logic push;   // accept new request from master
+    logic pop;    // release request to ordering unit
 
-    // Upstream sees ready when not full
+    // Master sees ready when not full
     always_comb begin
-        ar_in.ready = ~full;
+        ar_in.ready = ~full;           // bitwise not
     end
 
-    // Downstream sees valid when not empty
+    // Ordering unit sees valid when not empty
     always_comb begin
-        ar_out.valid = ~empty;
+        ar_out.valid = ~empty;         // bitwise not
     end
 
     // Push/pop conditions (bitwise & only)
@@ -113,7 +111,6 @@ module OutcomingRequestBuffer #(
             count_q  <= '0;
         end
         else begin
-
             // --------------------
             // WRITE side (push)
             // --------------------
@@ -125,7 +122,7 @@ module OutcomingRequestBuffer #(
                 mem[wr_ptr_q].burst <= ar_in.burst;
                 mem[wr_ptr_q].qos   <= ar_in.qos;
 
-                // wr_ptr wrap-around
+                // wr_ptr_q wrap-around
                 if (wr_ptr_q == (DEPTH-1)[PTR_W-1:0])
                     wr_ptr_q <= '0;
                 else
@@ -136,7 +133,7 @@ module OutcomingRequestBuffer #(
             // READ side (pop)
             // --------------------
             if (pop) begin
-                // rd_ptr wrap-around
+                // rd_ptr_q wrap-around
                 if (rd_ptr_q == (DEPTH-1)[PTR_W-1:0])
                     rd_ptr_q <= '0;
                 else

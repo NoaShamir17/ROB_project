@@ -1,56 +1,52 @@
 // ============================================================================
-// IncomingRequestBuffer.sv
+// incoming_response_buffer.sv
 // ----------------------------------------------------------------------------
-// 8-entry FIFO for AXI AR requests.
+// 8-entry FIFO for AXI R beats.
 //
-// ar_in  : AR from master      (ar_if.receiver)
-// ar_out : AR to ordering unit (ar_if.sender)
+// r_in  : R from AXI slave         (r_if.receiver)
+// r_out : R to r_id_ordering_unit  (r_if.sender)
 //
 // Behavior:
-//   - When not full, ar_in.ready = 1 and we accept requests on
-//       ar_in.valid & ar_in.ready (push).
-//   - When not empty, ar_out.valid = 1 and we provide the oldest request.
-//       On ar_out.valid & ar_out.ready we pop that request.
+//   - When not full, r_in.ready = 1 and we accept beats on
+//       r_in.valid & r_in.ready (push).
+//   - When not empty, r_out.valid = 1 and we provide the oldest beat.
+//       On r_out.valid & r_out.ready we pop that beat.
 //
 // Control uses only bitwise &, |, ~ (no &&, ||, !).
 // ============================================================================
 
-module IncomingRequestBuffer #(
-    parameter int ID_WIDTH    = 8,
-    parameter int ADDR_WIDTH  = 32,
-    parameter int LEN_WIDTH   = 8,
-    parameter int SIZE_WIDTH  = 3,
-    parameter int BURST_WIDTH = 2,
-    parameter int QOS_WIDTH   = 4,
-    parameter int DEPTH       = 8      // number of AR entries stored
+module incoming_response_buffer #(
+    parameter int ID_WIDTH    = 4,
+    parameter int DATA_WIDTH  = 64,
+    parameter int RESP_WIDTH  = 2,
+    parameter int DEPTH       = 8
 )(
     input  logic clk,
     input  logic rst,          // async, active-high
 
-    // AR from AXI master
-    ar_if.receiver ar_in,
+    // R from AXI slave
+    r_if.receiver r_in,
 
-    // AR toward ar_id_ordering_unit
-    ar_if.sender   ar_out,
+    // R toward r_id_ordering_unit
+    r_if.sender   r_out,
+
 );
 
     // -------------------------------------------------------------
-    // One AR entry record
+    // One R entry record (single beat)
     // -------------------------------------------------------------
     typedef struct packed {
         logic [ID_WIDTH-1:0]    id;
-        logic [ADDR_WIDTH-1:0]  addr;
-        logic [LEN_WIDTH-1:0]   len;
-        logic [SIZE_WIDTH-1:0]  size;
-        logic [BURST_WIDTH-1:0] burst;
-        logic [QOS_WIDTH-1:0]   qos;
-    } ar_entry_t;
+        logic [DATA_WIDTH-1:0]  data;
+        logic [RESP_WIDTH-1:0]  resp;
+        logic                   last;
+    } r_entry_t;
 
     localparam int PTR_W = (DEPTH <= 2) ? 1 : $clog2(DEPTH);
     localparam int CNT_W = $clog2(DEPTH + 1);
 
     // FIFO storage
-    ar_entry_t        mem     [0:DEPTH-1];
+    r_entry_t         mem     [0:DEPTH-1];
     logic [PTR_W-1:0] wr_ptr_q;
     logic [PTR_W-1:0] rd_ptr_q;
     logic [CNT_W-1:0] count_q;
@@ -70,35 +66,34 @@ module IncomingRequestBuffer #(
     // -------------------------------------------------------------
     // Handshake and fire signals
     // -------------------------------------------------------------
-    logic push;   // accept new request from master
-    logic pop;    // release request to ordering unit
+    logic push;   // accept new beat from slave
+    logic pop;    // release beat to ordering unit
 
-    // Master sees ready when not full
+    // Slave sees ready when not full
     always_comb begin
-        ar_in.ready = ~full;           // bitwise not
+        r_in.ready = ~full;           // bitwise not
     end
 
     // Ordering unit sees valid when not empty
     always_comb begin
-        ar_out.valid = ~empty;         // bitwise not
+        r_out.valid = ~empty;         // bitwise not
     end
 
     // Push/pop conditions (bitwise & only)
     always_comb begin
-        push = ar_in.valid & ar_in.ready;
-        pop  = ar_out.valid & ar_out.ready;
+        push = r_in.valid & r_in.ready;
+        pop  = r_out.valid & r_out.ready;
     end
 
     // -------------------------------------------------------------
-    // Head entry → ar_out (combinational)
+    // Head entry → r_out (combinational)
     // -------------------------------------------------------------
     always_comb begin
-        ar_out.id    = mem[rd_ptr_q].id;
-        ar_out.addr  = mem[rd_ptr_q].addr;
-        ar_out.len   = mem[rd_ptr_q].len;
-        ar_out.size  = mem[rd_ptr_q].size;
-        ar_out.burst = mem[rd_ptr_q].burst;
-        ar_out.qos   = mem[rd_ptr_q].qos;
+        r_out.id   = mem[rd_ptr_q].id;
+        r_out.data = mem[rd_ptr_q].data;
+        r_out.resp = mem[rd_ptr_q].resp;
+        r_out.last = mem[rd_ptr_q].last;
+        // If empty == 1, values are don't-care; consumer must check r_out.valid
     end
 
     // -------------------------------------------------------------
@@ -111,16 +106,15 @@ module IncomingRequestBuffer #(
             count_q  <= '0;
         end
         else begin
+
             // --------------------
             // WRITE side (push)
             // --------------------
             if (push) begin
-                mem[wr_ptr_q].id    <= ar_in.id;
-                mem[wr_ptr_q].addr  <= ar_in.addr;
-                mem[wr_ptr_q].len   <= ar_in.len;
-                mem[wr_ptr_q].size  <= ar_in.size;
-                mem[wr_ptr_q].burst <= ar_in.burst;
-                mem[wr_ptr_q].qos   <= ar_in.qos;
+                mem[wr_ptr_q].id   <= r_in.id;
+                mem[wr_ptr_q].data <= r_in.data;
+                mem[wr_ptr_q].resp <= r_in.resp;
+                mem[wr_ptr_q].last <= r_in.last;
 
                 // wr_ptr_q wrap-around
                 if (wr_ptr_q == (DEPTH-1)[PTR_W-1:0])
@@ -149,6 +143,7 @@ module IncomingRequestBuffer #(
             else if ((~push) & pop) begin
                 count_q <= count_q - {{(CNT_W-1){1'b0}}, 1'b1};
             end
+            // push & pop or neither → no change
         end
     end
 

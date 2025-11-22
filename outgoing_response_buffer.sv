@@ -1,10 +1,10 @@
 // ============================================================================
-// IncomingResponseBuffer.sv
+// outgoing_response_buffer.sv
 // ----------------------------------------------------------------------------
-// 8-entry FIFO for AXI R beats.
+// 8-entry FIFO for AXI R beats on the outgoing side.
 //
-// r_in  : R from AXI slave         (r_if.receiver)
-// r_out : R to r_id_ordering_unit  (r_if.sender)
+// r_in  : R from r_id_ordering_unit  (r_if.receiver)
+// r_out : R to AXI master            (r_if.sender)
 //
 // Behavior:
 //   - When not full, r_in.ready = 1 and we accept beats on
@@ -15,7 +15,7 @@
 // Control uses only bitwise &, |, ~ (no &&, ||, !).
 // ============================================================================
 
-module IncomingResponseBuffer #(
+module outgoing_response_buffer #(
     parameter int ID_WIDTH    = 4,
     parameter int DATA_WIDTH  = 64,
     parameter int RESP_WIDTH  = 2,
@@ -24,10 +24,10 @@ module IncomingResponseBuffer #(
     input  logic clk,
     input  logic rst,          // async, active-high
 
-    // R from AXI slave
+    // R from r_id_ordering_unit
     r_if.receiver r_in,
 
-    // R toward r_id_ordering_unit
+    // R towards AXI master
     r_if.sender   r_out,
 
 );
@@ -61,20 +61,21 @@ module IncomingResponseBuffer #(
     always_comb begin
         empty = (count_q == '0);
         full  = (count_q == DEPTH[CNT_W-1:0]);
+
     end
 
     // -------------------------------------------------------------
     // Handshake and fire signals
     // -------------------------------------------------------------
-    logic push;   // accept new beat from slave
-    logic pop;    // release beat to ordering unit
+    logic push;   // accept new beat from ordering unit
+    logic pop;    // release beat to master
 
-    // Slave sees ready when not full
+    // Upstream sees ready when not full
     always_comb begin
         r_in.ready = ~full;           // bitwise not
     end
 
-    // Ordering unit sees valid when not empty
+    // Downstream sees valid when not empty
     always_comb begin
         r_out.valid = ~empty;         // bitwise not
     end
@@ -93,7 +94,7 @@ module IncomingResponseBuffer #(
         r_out.data = mem[rd_ptr_q].data;
         r_out.resp = mem[rd_ptr_q].resp;
         r_out.last = mem[rd_ptr_q].last;
-        // If empty == 1, values are don't-care; consumer must check r_out.valid
+        // If empty == 1, values are don't-care; consumer checks r_out.valid
     end
 
     // -------------------------------------------------------------
