@@ -1,5 +1,5 @@
 // ============================================================================
-// response_park.sv
+// response_memory.sv
 // ----------------------------------------------------------------------------
 // ROLE
 //   • Per-UID storage of R beats.
@@ -12,7 +12,7 @@
 //     (free_req & !empty & r_out.ready) and stays high until clk↑.
 // ============================================================================
 
-module response_park #(
+module response_memory #(
     parameter int NUM_UIDS   = 16,
     parameter int MAX_BEATS  = 8,
     parameter int ID_WIDTH   = $clog2(NUM_UIDS),

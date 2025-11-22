@@ -12,7 +12,7 @@
 // 4. outgoing_request_buffer -> AXI Slave (axi_ar_out)
 //
 // 5. AXI Slave (axi_r_in) -> incoming_response_buffer
-// 6. incoming_response_buffer -> r_ordering_unit (stores in response_park/WM)
+// 6. incoming_response_buffer -> r_ordering_unit (stores in response_memory/WM)
 // 7. r_ordering_unit -> outgoing_response_buffer (releases ordered data)
 // 8. outgoing_response_buffer -> AXI Master (axi_r_out)
 //
@@ -24,7 +24,7 @@
 //TODO: count how many cycles it takes for a request to go from axi_ar_in to axi_ar_out
 //TODO: count how many cycles it takes for a response to go from axi_r_in to axi_r_out
 //TODO: check if r_ordering_unit needs FSM like ar_ordering_unit
-//TODO: add the "last" signal to response_park and every where it's missing and check what happens with multi-beat requests/responses
+//TODO: add the "last" signal to response_memory and every where it's missing and check what happens with multi-beat requests/responses
 // ============================================================================
 module top #(
     parameter int ID_WIDTH          = 4,
@@ -101,11 +101,11 @@ module top #(
     logic                 free_ack;        // optional
 
     // ---------------------------
-    // response_park wires
+    // response_memory wires
     // ---------------------------
-    // exact response_park ports are tool-dependent; expose request/release control
+    // exact response_memory ports are tool-dependent; expose request/release control
     logic                 wm_in_valid;
-    logic                 wm_in_ready;   // TODO: connect if response_park exposes
+    logic                 wm_in_ready;   // TODO: connect if response_memory exposes
     logic [UID_W-1:0]     wm_in_uid;
     logic [DATA_WIDTH-1:0] wm_in_data;
     logic [RESP_WIDTH-1:0] wm_in_resp;
@@ -198,8 +198,8 @@ module top #(
         .out_if  (axi_r_out)
     );
 
-    // response_park: store partial/multi-beat responses (ports vary across your file)
-    response_park #(
+    // response_memory: store partial/multi-beat responses (ports vary across your file)
+    response_memory #(
         .NUM_ROWS(NUM_ROWS),
         .NUM_COLS(NUM_COLS),
         .MAX_REQ(MAX_OUTSTANDING),
@@ -207,13 +207,13 @@ module top #(
         .RESP_WIDTH(RESP_WIDTH),
         .ID_WIDTH(ID_WIDTH),
         .TAG_WIDTH(TAG_WIDTH)
-    ) u_response_park (
+    ) u_response_memory (
         .clk         (clk),
         .rst         (rst),
 
         // write path: driven by r_ordering_unit's "store" handshake
         .in_valid    (wm_in_valid),    // TODO: connect to r_ordering_unit store-valid
-        .in_ready    (wm_in_ready),    // TODO: check if response_park exposes in_ready
+        .in_ready    (wm_in_ready),    // TODO: check if response_memory exposes in_ready
         .in_uid      (wm_in_uid),      // UID
         .in_data     (wm_in_data),
         .in_resp     (wm_in_resp),
@@ -234,10 +234,10 @@ module top #(
         .free_req    (free_req),        // free request from r_ordering_unit -> allocator
         .id_to_release (free_unique_id),
         .full        (wm_full)
-        // .free_ack  () // TODO: if response_park exposes free_ack, connect or mark unused
+        // .free_ack  () // TODO: if response_memory exposes free_ack, connect or mark unused
     );
 
-    // r_ordering_unit: read from ic_resp_if, write to response_park and/or oc_resp_if
+    // r_ordering_unit: read from ic_resp_if, write to response_memory and/or oc_resp_if
     r_ordering_unit #(
         .ID_WIDTH(ID_WIDTH),
         .MAX_OUTSTANDING(MAX_OUTSTANDING),
@@ -265,7 +265,7 @@ module top #(
 
         .wm_release_en (wm_alloc_req),
         .wm_release_uid (wm_alloc_uid),
-        .wm_release_gnt (wm_alloc_gnt), // TODO: may be output from response_park instead
+        .wm_release_gnt (wm_alloc_gnt), // TODO: may be output from response_memory instead
 
         // allocator free request (when a UID is finished and can be freed)
         .free_req     (free_req),
@@ -275,7 +275,7 @@ module top #(
         .restored_id  (restored_id) // TODO: ensure r_ordering_unit has this input
     );
 
-    // connect response_park release outputs into oc_resp_if (if not done inside r_ordering_unit)
+    // connect response_memory release outputs into oc_resp_if (if not done inside r_ordering_unit)
     // Common patterns:
     // - r_ordering_unit asks park to release and then forwards park's out_* into its r_out -> oc_resp_if
     // If your r_ordering_unit does NOT forward park outputs, you need to add assigns here.
