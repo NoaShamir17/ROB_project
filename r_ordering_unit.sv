@@ -1,4 +1,4 @@
-module r_id_ordering_unit #(
+module r_ordering_unit #(
     parameter int ID_WIDTH         = 4,   // original ID width
     parameter int MAX_OUTSTANDING  = 16,
     parameter int NUM_ROWS = MAX_OUTSTANDING,

@@ -3,7 +3,7 @@
 // ----------------------------------------------------------------------------
 // 8-entry FIFO for AXI R beats on the outgoing side.
 //
-// r_in  : R from r_id_ordering_unit  (r_if.receiver)
+// r_in  : R from r_ordering_unit  (r_if.receiver)
 // r_out : R to AXI master            (r_if.sender)
 //
 // Behavior:
@@ -24,7 +24,7 @@ module outgoing_response_buffer #(
     input  logic clk,
     input  logic rst,          // async, active-high
 
-    // R from r_id_ordering_unit
+    // R from r_ordering_unit
     r_if.receiver r_in,
 
     // R towards AXI master

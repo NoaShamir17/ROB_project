@@ -12,18 +12,18 @@
 // 4. outgoing_request_buffer -> AXI Slave (axi_ar_out)
 //
 // 5. AXI Slave (axi_r_in) -> incoming_response_buffer
-// 6. incoming_response_buffer -> r_id_ordering_unit (stores in response_park/WM)
-// 7. r_id_ordering_unit -> outgoing_response_buffer (releases ordered data)
+// 6. incoming_response_buffer -> r_ordering_unit (stores in response_park/WM)
+// 7. r_ordering_unit -> outgoing_response_buffer (releases ordered data)
 // 8. outgoing_response_buffer -> AXI Master (axi_r_out)
 //
 // Allocator (allocator_tag_map) is shared by ar_ordering_unit (alloc) and
-// r_id_ordering_unit (free + restored ID lookup).
+// r_ordering_unit (free + restored ID lookup).
 
 //TODO: match all r_if and ar_if
 //TODO: implement everything marked as TODO in the code below
 //TODO: count how many cycles it takes for a request to go from axi_ar_in to axi_ar_out
 //TODO: count how many cycles it takes for a response to go from axi_r_in to axi_r_out
-//TODO: check if r_id_ordering_unit needs FSM like ar_ordering_unit
+//TODO: check if r_ordering_unit needs FSM like ar_ordering_unit
 //TODO: add the "last" signal to response_park and every where it's missing and check what happens with multi-beat requests/responses
 // ============================================================================
 module top #(
@@ -70,7 +70,7 @@ module top #(
         .LEN_WIDTH($clog2(MAX_LEN))
     ) oc_req_if ();
 
-+    // ic_resp: AXI R from slave -> incoming_response_buffer -> input to r_id_ordering_unit
++    // ic_resp: AXI R from slave -> incoming_response_buffer -> input to r_ordering_unit
     r_if #(
         .ID_WIDTH(UID_W),           // TODO: this must hold UID coming from AR path; if your r_if uses original ID width, change accordingly
         .DATA_WIDTH(DATA_WIDTH),
@@ -78,7 +78,7 @@ module top #(
         .TAG_WIDTH(TAG_WIDTH)
     ) ic_resp_if ();
 
-    // oc_resp: output of r_id_ordering_unit -> outgoing_response_buffer -> axi_r_out
+    // oc_resp: output of r_ordering_unit -> outgoing_response_buffer -> axi_r_out
     r_if #(
         .ID_WIDTH(ID_WIDTH),       // final outgoing response should have original master ID
         .DATA_WIDTH(DATA_WIDTH),
@@ -211,8 +211,8 @@ module top #(
         .clk         (clk),
         .rst         (rst),
 
-        // write path: driven by r_id_ordering_unit's "store" handshake
-        .in_valid    (wm_in_valid),    // TODO: connect to r_id_ordering_unit store-valid
+        // write path: driven by r_ordering_unit's "store" handshake
+        .in_valid    (wm_in_valid),    // TODO: connect to r_ordering_unit store-valid
         .in_ready    (wm_in_ready),    // TODO: check if response_park exposes in_ready
         .in_uid      (wm_in_uid),      // UID
         .in_data     (wm_in_data),
@@ -221,8 +221,8 @@ module top #(
         .in_orig_id  (wm_in_orig_id),
         .in_tagid    (wm_in_tagid),
 
-        // release (alloc) request from r_id_ordering_unit
-        .alloc_req   (wm_alloc_req),   // r_id_ordering_unit asks park to release next ordered resp
+        // release (alloc) request from r_ordering_unit
+        .alloc_req   (wm_alloc_req),   // r_ordering_unit asks park to release next ordered resp
         .alloc_uid   (wm_alloc_uid),   // requested UID to release
         .alloc_gnt   (wm_alloc_gnt),
         .out_data    (wm_out_data),
@@ -231,20 +231,20 @@ module top #(
         .out_orig_id (wm_out_orig_id),
         .out_tagid   (wm_out_tagid),
 
-        .free_req    (free_req),        // free request from r_id_ordering_unit -> allocator
+        .free_req    (free_req),        // free request from r_ordering_unit -> allocator
         .id_to_release (free_unique_id),
         .full        (wm_full)
         // .free_ack  () // TODO: if response_park exposes free_ack, connect or mark unused
     );
 
-    // r_id_ordering_unit: read from ic_resp_if, write to response_park and/or oc_resp_if
-    r_id_ordering_unit #(
+    // r_ordering_unit: read from ic_resp_if, write to response_park and/or oc_resp_if
+    r_ordering_unit #(
         .ID_WIDTH(ID_WIDTH),
         .MAX_OUTSTANDING(MAX_OUTSTANDING),
         .NUM_ROWS(NUM_ROWS),
         .NUM_COLS(NUM_COLS)
         // TODO: add UID width param if unit defines it
-    ) u_r_id_ordering_unit (
+    ) u_r_ordering_unit (
         .clk          (clk),
         .rst          (rst),
 
@@ -271,20 +271,20 @@ module top #(
         .free_req     (free_req),
         .free_uid     (free_unique_id),
 
-        // restored id from allocator (if r_id_ordering_unit needs lookups)
-        .restored_id  (restored_id) // TODO: ensure r_id_ordering_unit has this input
+        // restored id from allocator (if r_ordering_unit needs lookups)
+        .restored_id  (restored_id) // TODO: ensure r_ordering_unit has this input
     );
 
-    // connect response_park release outputs into oc_resp_if (if not done inside r_id_ordering_unit)
+    // connect response_park release outputs into oc_resp_if (if not done inside r_ordering_unit)
     // Common patterns:
-    // - r_id_ordering_unit asks park to release and then forwards park's out_* into its r_out -> oc_resp_if
-    // If your r_id_ordering_unit does NOT forward park outputs, you need to add assigns here.
+    // - r_ordering_unit asks park to release and then forwards park's out_* into its r_out -> oc_resp_if
+    // If your r_ordering_unit does NOT forward park outputs, you need to add assigns here.
     // Example (uncomment/adapt if needed):
     // assign oc_resp_if.id   = wm_out_orig_id;
     // assign oc_resp_if.data = wm_out_data;
     // assign oc_resp_if.resp = wm_out_resp;
     // assign oc_resp_if.last = wm_out_last;
     // assign oc_resp_if.tagid= wm_out_tagid;
-    // // and drive oc_resp_if.valid from wm_alloc_gnt / r_id_ordering_unit release handshake
+    // // and drive oc_resp_if.valid from wm_alloc_gnt / r_ordering_unit release handshake
 
 endmodule

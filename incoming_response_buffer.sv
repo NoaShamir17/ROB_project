@@ -4,7 +4,7 @@
 // 8-entry FIFO for AXI R beats.
 //
 // r_in  : R from AXI slave         (r_if.receiver)
-// r_out : R to r_id_ordering_unit  (r_if.sender)
+// r_out : R to r_ordering_unit  (r_if.sender)
 //
 // Behavior:
 //   - When not full, r_in.ready = 1 and we accept beats on
@@ -27,7 +27,7 @@ module incoming_response_buffer #(
     // R from AXI slave
     r_if.receiver r_in,
 
-    // R toward r_id_ordering_unit
+    // R toward r_ordering_unit
     r_if.sender   r_out,
 
 );
