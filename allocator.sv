@@ -1,4 +1,4 @@
-module id_allocate_and_restore_unit #(
+module allocator #(
     parameter int ID_WIDTH = 4,
     parameter int MAX_OUTSTANDING = 16,
     parameter int NUM_ROWS = $clog2(MAX_OUTSTANDING),

@@ -199,7 +199,7 @@ module top_module #(
     // ========================================================================
     // 1. allocator_tag_map Instantiation
     // ========================================================================
-    id_allocate_and_restore_unit #(
+    allocator #(
         .ID_WIDTH(ID_WIDTH),
         .MAX_OUTSTANDING(MAX_OUTSTANDING)
     ) i_allocator_tag_map (
