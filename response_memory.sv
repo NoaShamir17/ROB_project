@@ -15,7 +15,7 @@
 module response_memory #(
     parameter int NUM_UIDS   = 16,
     parameter int MAX_BEATS  = 8,
-    parameter int ID_WIDTH   = $clog2(NUM_UIDS),
+    parameter int ID_WIDTH   = 4,
     parameter int DATA_WIDTH = 64,
     parameter int RESP_WIDTH = 2
 )(
