@@ -70,7 +70,7 @@ module top #(
         .LEN_WIDTH($clog2(MAX_LEN))
     ) oc_req_if ();
 
-+    // ic_resp: AXI R from slave -> incoming_response_buffer -> input to r_ordering_unit
+    // ic_resp: AXI R from slave -> incoming_response_buffer -> input to r_ordering_unit
     r_if #(
         .ID_WIDTH(UID_W),           // TODO: this must hold UID coming from AR path; if your r_if uses original ID width, change accordingly
         .DATA_WIDTH(DATA_WIDTH),
