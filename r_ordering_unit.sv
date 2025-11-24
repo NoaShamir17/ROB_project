@@ -3,7 +3,7 @@ module r_ordering_unit #(
     parameter int MAX_OUTSTANDING  = 16,
     parameter int NUM_ROWS = MAX_OUTSTANDING,
     parameter int NUM_COLS = MAX_OUTSTANDING,
-    parameter int MAX_LEN = 8, //max beats per response
+    parameter int MAX_LEN = 8 //max beats per response
 )(
     input  logic clk,
     input  logic rst,
@@ -26,7 +26,7 @@ module r_ordering_unit #(
                                             //ready means memory can accept data
 
     output logic [ID_WIDTH-1:0]  rm_release_uid,
-    r_if.receiver                r_release, // data returned when released
+    r_if.receiver                r_release // data returned when released
                                                   // valid means data from memory is valid
                                                   //ready means request to release data
 
@@ -51,7 +51,7 @@ module r_ordering_unit #(
     generate
         for (row = 0; row < NUM_ROWS; row = row + 1) begin : gen_waiting_map_row
             for (col = 0; col < NUM_COLS; col = col + 1) begin : gen_waiting_map_col
-                waiting_map[row][col] = |(waiting_beats_count[row][col] ^ {BEAT_CNT_W{1'b0}}); // high when beats count is non-zero
+                assign waiting_map[row][col] = |(waiting_beats_count[row][col] ^ {BEAT_CNT_W{1'b0}}); // high when beats count is non-zero
             end
         end
     endgenerate
@@ -89,7 +89,7 @@ module r_ordering_unit #(
         // defaults
         rm_hit_uid = '0;
 
-        for (r = 0; r < NUM_ROWS; r++) begin : gen_rm_hit_vec
+        for (int r = 0; r < NUM_ROWS; r++) begin : gen_rm_hit_vec
             rm_hit_vec[r] = waiting_map[r][release_idx[r]]; // high when that row has a hit
 
             //first row logic
