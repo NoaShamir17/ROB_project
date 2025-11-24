@@ -31,7 +31,7 @@ module incoming_request_buffer #(
     ar_if.receiver ar_in,
 
     // AR toward ar_ordering_unit
-    ar_if.sender   ar_out,
+    ar_if.sender   ar_out
 );
 
     // -------------------------------------------------------------
@@ -46,6 +46,7 @@ module incoming_request_buffer #(
         logic [QOS_WIDTH-1:0]   qos;
     } ar_entry_t;
 
+    // Pointer / counter widths
     localparam int PTR_W = (DEPTH <= 2) ? 1 : $clog2(DEPTH);
     localparam int CNT_W = $clog2(DEPTH + 1);
 
@@ -63,8 +64,9 @@ module incoming_request_buffer #(
     // Empty / full
     // -------------------------------------------------------------
     always_comb begin
-        empty = (count_q == '0);
-        full  = (count_q == DEPTH[CNT_W-1:0]);
+        empty = (count_q == {CNT_W{1'b0}});
+        // Cast DEPTH to CNT_W bits instead of doing a strange part-select
+        full  = (count_q == CNT_W'(DEPTH));
     end
 
     // -------------------------------------------------------------
@@ -93,12 +95,23 @@ module incoming_request_buffer #(
     // Head entry → ar_out (combinational)
     // -------------------------------------------------------------
     always_comb begin
-        ar_out.id    = mem[rd_ptr_q].id;
-        ar_out.addr  = mem[rd_ptr_q].addr;
-        ar_out.len   = mem[rd_ptr_q].len;
-        ar_out.size  = mem[rd_ptr_q].size;
-        ar_out.burst = mem[rd_ptr_q].burst;
-        ar_out.qos   = mem[rd_ptr_q].qos;
+        // If empty, drive zeros to avoid X explosion in sim
+        if (empty) begin
+            ar_out.id    = {ID_WIDTH{1'b0}};
+            ar_out.addr  = {ADDR_WIDTH{1'b0}};
+            ar_out.len   = {LEN_WIDTH{1'b0}};
+            ar_out.size  = {SIZE_WIDTH{1'b0}};
+            ar_out.burst = {BURST_WIDTH{1'b0}};
+            ar_out.qos   = {QOS_WIDTH{1'b0}};
+        end
+        else begin
+            ar_out.id    = mem[rd_ptr_q].id;
+            ar_out.addr  = mem[rd_ptr_q].addr;
+            ar_out.len   = mem[rd_ptr_q].len;
+            ar_out.size  = mem[rd_ptr_q].size;
+            ar_out.burst = mem[rd_ptr_q].burst;
+            ar_out.qos   = mem[rd_ptr_q].qos;
+        end
     end
 
     // -------------------------------------------------------------
@@ -123,7 +136,7 @@ module incoming_request_buffer #(
                 mem[wr_ptr_q].qos   <= ar_in.qos;
 
                 // wr_ptr_q wrap-around
-                if (wr_ptr_q == (DEPTH-1)[PTR_W-1:0])
+                if (wr_ptr_q == PTR_W'(DEPTH-1))
                     wr_ptr_q <= '0;
                 else
                     wr_ptr_q <= wr_ptr_q + {{(PTR_W-1){1'b0}}, 1'b1};
@@ -134,7 +147,7 @@ module incoming_request_buffer #(
             // --------------------
             if (pop) begin
                 // rd_ptr_q wrap-around
-                if (rd_ptr_q == (DEPTH-1)[PTR_W-1:0])
+                if (rd_ptr_q == PTR_W'(DEPTH-1))
                     rd_ptr_q <= '0;
                 else
                     rd_ptr_q <= rd_ptr_q + {{(PTR_W-1){1'b0}}, 1'b1};
@@ -149,6 +162,7 @@ module incoming_request_buffer #(
             else if ((~push) & pop) begin
                 count_q <= count_q - {{(CNT_W-1){1'b0}}, 1'b1};
             end
+            // if push & pop both 1 → same occupancy, count_q unchanged
         end
     end
 

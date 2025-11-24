@@ -4,7 +4,7 @@
 // 8-entry FIFO for AXI R beats on the outgoing side.
 //
 // r_in  : R from r_ordering_unit  (r_if.receiver)
-// r_out : R to AXI master            (r_if.sender)
+// r_out : R to AXI master          (r_if.sender)
 //
 // Behavior:
 //   - When not full, r_in.ready = 1 and we accept beats on
@@ -27,9 +27,8 @@ module outgoing_response_buffer #(
     // R from r_ordering_unit
     r_if.receiver r_in,
 
-    // R towards AXI master
-    r_if.sender   r_out,
-
+    // R toward AXI master
+    r_if.sender   r_out        // *** FIXED: removed extra comma ***
 );
 
     // -------------------------------------------------------------
@@ -52,37 +51,36 @@ module outgoing_response_buffer #(
     logic [CNT_W-1:0] count_q;
 
     // Status flags
-    logic             empty;
-    logic             full;
+    logic empty;
+    logic full;
 
     // -------------------------------------------------------------
     // Empty / full
     // -------------------------------------------------------------
     always_comb begin
-        empty = (count_q == '0);
-        full  = (count_q == DEPTH[CNT_W-1:0]);
-
+        empty = (count_q == {CNT_W{1'b0}});
+        full  = (count_q == CNT_W'(DEPTH));   // *** FIXED ***
     end
 
     // -------------------------------------------------------------
     // Handshake and fire signals
     // -------------------------------------------------------------
-    logic push;   // accept new beat from ordering unit
-    logic pop;    // release beat to master
+    logic push;
+    logic pop;
 
-    // Upstream sees ready when not full
+    // r_in sees ready when FIFO not full
     always_comb begin
-        r_in.ready = ~full;           // bitwise not
+        r_in.ready = ~full;
     end
 
-    // Downstream sees valid when not empty
+    // r_out sees valid when FIFO not empty
     always_comb begin
-        r_out.valid = ~empty;         // bitwise not
+        r_out.valid = ~empty;
     end
 
-    // Push/pop conditions (bitwise & only)
+    // Bitwise-only fire logic
     always_comb begin
-        push = r_in.valid & r_in.ready;
+        push = r_in.valid  & r_in.ready;
         pop  = r_out.valid & r_out.ready;
     end
 
@@ -90,15 +88,22 @@ module outgoing_response_buffer #(
     // Head entry → r_out (combinational)
     // -------------------------------------------------------------
     always_comb begin
-        r_out.id   = mem[rd_ptr_q].id;
-        r_out.data = mem[rd_ptr_q].data;
-        r_out.resp = mem[rd_ptr_q].resp;
-        r_out.last = mem[rd_ptr_q].last;
-        // If empty == 1, values are don't-care; consumer checks r_out.valid
+        if (empty) begin
+            r_out.id   = {ID_WIDTH{1'b0}};
+            r_out.data = {DATA_WIDTH{1'b0}};
+            r_out.resp = {RESP_WIDTH{1'b0}};
+            r_out.last = 1'b0;
+        end
+        else begin
+            r_out.id   = mem[rd_ptr_q].id;
+            r_out.data = mem[rd_ptr_q].data;
+            r_out.resp = mem[rd_ptr_q].resp;
+            r_out.last = mem[rd_ptr_q].last;
+        end
     end
 
     // -------------------------------------------------------------
-    // Sequential update: write, read, count, pointers
+    // Sequential: write, read, count, pointers
     // -------------------------------------------------------------
     always_ff @(posedge clk or posedge rst) begin
         if (rst) begin
@@ -109,7 +114,7 @@ module outgoing_response_buffer #(
         else begin
 
             // --------------------
-            // WRITE side (push)
+            // WRITE (push)
             // --------------------
             if (push) begin
                 mem[wr_ptr_q].id   <= r_in.id;
@@ -117,26 +122,25 @@ module outgoing_response_buffer #(
                 mem[wr_ptr_q].resp <= r_in.resp;
                 mem[wr_ptr_q].last <= r_in.last;
 
-                // wr_ptr_q wrap-around
-                if (wr_ptr_q == (DEPTH-1)[PTR_W-1:0])
+                // Wrap-around
+                if (wr_ptr_q == PTR_W'(DEPTH-1))
                     wr_ptr_q <= '0;
                 else
                     wr_ptr_q <= wr_ptr_q + {{(PTR_W-1){1'b0}}, 1'b1};
             end
 
             // --------------------
-            // READ side (pop)
+            // READ (pop)
             // --------------------
             if (pop) begin
-                // rd_ptr_q wrap-around
-                if (rd_ptr_q == (DEPTH-1)[PTR_W-1:0])
+                if (rd_ptr_q == PTR_W'(DEPTH-1))
                     rd_ptr_q <= '0;
                 else
                     rd_ptr_q <= rd_ptr_q + {{(PTR_W-1){1'b0}}, 1'b1};
             end
 
             // --------------------
-            // count_q update
+            // COUNT update
             // --------------------
             if (push & (~pop)) begin
                 count_q <= count_q + {{(CNT_W-1){1'b0}}, 1'b1};
@@ -144,7 +148,7 @@ module outgoing_response_buffer #(
             else if ((~push) & pop) begin
                 count_q <= count_q - {{(CNT_W-1){1'b0}}, 1'b1};
             end
-            // push & pop or neither → no change
+            // push & pop → no change
         end
     end
 

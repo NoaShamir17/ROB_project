@@ -4,7 +4,7 @@
 // 8-entry FIFO for AXI AR requests on the outgoing side.
 //
 // ar_in  : AR from ar_ordering_unit (ar_if.receiver)
-// ar_out : AR to AXI slave             (ar_if.sender)
+// ar_out : AR to AXI slave          (ar_if.sender)
 //
 // Behavior:
 //   - When not full, ar_in.ready = 1 and we accept requests on
@@ -31,8 +31,7 @@ module outgoing_request_buffer #(
     ar_if.receiver ar_in,
 
     // AR toward AXI slave
-    ar_if.sender   ar_out,
-
+    ar_if.sender   ar_out      // *** FIXED: removed trailing comma ***
 );
 
     // -------------------------------------------------------------
@@ -51,22 +50,22 @@ module outgoing_request_buffer #(
     localparam int CNT_W = $clog2(DEPTH + 1);
 
     // FIFO storage
-    ar_entry_t            mem     [0:DEPTH-1];
-    logic [PTR_W-1:0]     wr_ptr_q;
-    logic [PTR_W-1:0]     rd_ptr_q;
-    logic [CNT_W-1:0]     count_q;
+    ar_entry_t        mem     [0:DEPTH-1];
+    logic [PTR_W-1:0] wr_ptr_q;
+    logic [PTR_W-1:0] rd_ptr_q;
+    logic [CNT_W-1:0] count_q;
 
     // Status flags
-    logic                 empty;
-    logic                 full;
+    logic             empty;
+    logic             full;
 
     // -------------------------------------------------------------
     // Empty / full
     // -------------------------------------------------------------
     always_comb begin
-        empty = (count_q == '0);
-        full  = (count_q == DEPTH[CNT_W-1:0]);
-
+        empty = (count_q == {CNT_W{1'b0}});
+        // *** FIXED: cast DEPTH to CNT_W bits instead of DEPTH[CNT_W-1:0]
+        full  = (count_q == CNT_W'(DEPTH));
     end
 
     // -------------------------------------------------------------
@@ -95,12 +94,22 @@ module outgoing_request_buffer #(
     // Head entry → ar_out (combinational)
     // -------------------------------------------------------------
     always_comb begin
-        ar_out.id    = mem[rd_ptr_q].id;
-        ar_out.addr  = mem[rd_ptr_q].addr;
-        ar_out.len   = mem[rd_ptr_q].len;
-        ar_out.size  = mem[rd_ptr_q].size;
-        ar_out.burst = mem[rd_ptr_q].burst;
-        ar_out.qos   = mem[rd_ptr_q].qos;
+        if (empty) begin
+            ar_out.id    = {ID_WIDTH{1'b0}};
+            ar_out.addr  = {ADDR_WIDTH{1'b0}};
+            ar_out.len   = {LEN_WIDTH{1'b0}};
+            ar_out.size  = {SIZE_WIDTH{1'b0}};
+            ar_out.burst = {BURST_WIDTH{1'b0}};
+            ar_out.qos   = {QOS_WIDTH{1'b0}};
+        end
+        else begin
+            ar_out.id    = mem[rd_ptr_q].id;
+            ar_out.addr  = mem[rd_ptr_q].addr;
+            ar_out.len   = mem[rd_ptr_q].len;
+            ar_out.size  = mem[rd_ptr_q].size;
+            ar_out.burst = mem[rd_ptr_q].burst;
+            ar_out.qos   = mem[rd_ptr_q].qos;
+        end
     end
 
     // -------------------------------------------------------------
@@ -126,7 +135,7 @@ module outgoing_request_buffer #(
                 mem[wr_ptr_q].qos   <= ar_in.qos;
 
                 // wr_ptr wrap-around
-                if (wr_ptr_q == (DEPTH-1)[PTR_W-1:0])
+                if (wr_ptr_q == PTR_W'(DEPTH-1))
                     wr_ptr_q <= '0;
                 else
                     wr_ptr_q <= wr_ptr_q + {{(PTR_W-1){1'b0}}, 1'b1};
@@ -137,7 +146,7 @@ module outgoing_request_buffer #(
             // --------------------
             if (pop) begin
                 // rd_ptr wrap-around
-                if (rd_ptr_q == (DEPTH-1)[PTR_W-1:0])
+                if (rd_ptr_q == PTR_W'(DEPTH-1))
                     rd_ptr_q <= '0;
                 else
                     rd_ptr_q <= rd_ptr_q + {{(PTR_W-1){1'b0}}, 1'b1};
@@ -152,6 +161,7 @@ module outgoing_request_buffer #(
             else if ((~push) & pop) begin
                 count_q <= count_q - {{(CNT_W-1){1'b0}}, 1'b1};
             end
+            // push & pop or neither → no change
         end
     end
 

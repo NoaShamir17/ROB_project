@@ -3,14 +3,14 @@
 // ----------------------------------------------------------------------------
 // 8-entry FIFO for AXI R beats.
 //
-// r_in  : R from AXI slave         (r_if.receiver)
-// r_out : R to r_ordering_unit  (r_if.sender)
+// r_in  : R from AXI slave          (r_if.receiver)
+// r_out : R to r_ordering_unit      (r_if.sender)
 //
 // Behavior:
-//   - When not full, r_in.ready = 1 and we accept beats on
-//       r_in.valid & r_in.ready (push).
-//   - When not empty, r_out.valid = 1 and we provide the oldest beat.
-//       On r_out.valid & r_out.ready we pop that beat.
+//   - r_in.ready = 1 when FIFO not full
+//   - r_out.valid = 1 when FIFO not empty
+//   - push on  r_in.valid  & r_in.ready
+//   - pop  on  r_out.valid & r_out.ready
 //
 // Control uses only bitwise &, |, ~ (no &&, ||, !).
 // ============================================================================
@@ -22,18 +22,17 @@ module incoming_response_buffer #(
     parameter int DEPTH       = 8
 )(
     input  logic clk,
-    input  logic rst,          // async, active-high
+    input  logic rst,          // async active-high
 
     // R from AXI slave
     r_if.receiver r_in,
 
     // R toward r_ordering_unit
-    r_if.sender   r_out,
-
+    r_if.sender   r_out        // *** FIXED: removed extra comma ***
 );
 
     // -------------------------------------------------------------
-    // One R entry record (single beat)
+    // R entry (one beat)
     // -------------------------------------------------------------
     typedef struct packed {
         logic [ID_WIDTH-1:0]    id;
@@ -52,52 +51,51 @@ module incoming_response_buffer #(
     logic [CNT_W-1:0] count_q;
 
     // Status flags
-    logic             empty;
-    logic             full;
+    logic empty;
+    logic full;
 
     // -------------------------------------------------------------
-    // Empty / full
+    // Empty / full flags
     // -------------------------------------------------------------
     always_comb begin
-        empty = (count_q == '0);
-        full  = (count_q == DEPTH[CNT_W-1:0]);
+        empty = (count_q == {CNT_W{1'b0}});
+        full  = (count_q == CNT_W'(DEPTH));   // *** FIXED ***
     end
 
     // -------------------------------------------------------------
-    // Handshake and fire signals
+    // Handshake control
     // -------------------------------------------------------------
-    logic push;   // accept new beat from slave
-    logic pop;    // release beat to ordering unit
+    logic push;
+    logic pop;
 
-    // Slave sees ready when not full
     always_comb begin
-        r_in.ready = ~full;           // bitwise not
-    end
+        r_in.ready  = ~full;
+        r_out.valid = ~empty;
 
-    // Ordering unit sees valid when not empty
-    always_comb begin
-        r_out.valid = ~empty;         // bitwise not
-    end
-
-    // Push/pop conditions (bitwise & only)
-    always_comb begin
-        push = r_in.valid & r_in.ready;
+        push = r_in.valid  & r_in.ready;
         pop  = r_out.valid & r_out.ready;
     end
 
     // -------------------------------------------------------------
-    // Head entry → r_out (combinational)
+    // Output data (combinational)
     // -------------------------------------------------------------
     always_comb begin
-        r_out.id   = mem[rd_ptr_q].id;
-        r_out.data = mem[rd_ptr_q].data;
-        r_out.resp = mem[rd_ptr_q].resp;
-        r_out.last = mem[rd_ptr_q].last;
-        // If empty == 1, values are don't-care; consumer must check r_out.valid
+        if (empty) begin
+            r_out.id   = {ID_WIDTH{1'b0}};
+            r_out.data = {DATA_WIDTH{1'b0}};
+            r_out.resp = {RESP_WIDTH{1'b0}};
+            r_out.last = 1'b0;
+        end
+        else begin
+            r_out.id   = mem[rd_ptr_q].id;
+            r_out.data = mem[rd_ptr_q].data;
+            r_out.resp = mem[rd_ptr_q].resp;
+            r_out.last = mem[rd_ptr_q].last;
+        end
     end
 
     // -------------------------------------------------------------
-    // Sequential update: write, read, count, pointers
+    // Sequential logic
     // -------------------------------------------------------------
     always_ff @(posedge clk or posedge rst) begin
         if (rst) begin
@@ -107,43 +105,41 @@ module incoming_response_buffer #(
         end
         else begin
 
-            // --------------------
-            // WRITE side (push)
-            // --------------------
+            // -------------------------
+            // PUSH
+            // -------------------------
             if (push) begin
                 mem[wr_ptr_q].id   <= r_in.id;
                 mem[wr_ptr_q].data <= r_in.data;
                 mem[wr_ptr_q].resp <= r_in.resp;
                 mem[wr_ptr_q].last <= r_in.last;
 
-                // wr_ptr_q wrap-around
-                if (wr_ptr_q == (DEPTH-1)[PTR_W-1:0])
+                // pointer wrap
+                if (wr_ptr_q == PTR_W'(DEPTH-1))
                     wr_ptr_q <= '0;
                 else
                     wr_ptr_q <= wr_ptr_q + {{(PTR_W-1){1'b0}}, 1'b1};
             end
 
-            // --------------------
-            // READ side (pop)
-            // --------------------
+            // -------------------------
+            // POP
+            // -------------------------
             if (pop) begin
-                // rd_ptr_q wrap-around
-                if (rd_ptr_q == (DEPTH-1)[PTR_W-1:0])
+                if (rd_ptr_q == PTR_W'(DEPTH-1))
                     rd_ptr_q <= '0;
                 else
                     rd_ptr_q <= rd_ptr_q + {{(PTR_W-1){1'b0}}, 1'b1};
             end
 
-            // --------------------
-            // count_q update
-            // --------------------
+            // -------------------------
+            // COUNT
+            // -------------------------
             if (push & (~pop)) begin
                 count_q <= count_q + {{(CNT_W-1){1'b0}}, 1'b1};
             end
             else if ((~push) & pop) begin
                 count_q <= count_q - {{(CNT_W-1){1'b0}}, 1'b1};
             end
-            // push & pop or neither → no change
         end
     end
 
