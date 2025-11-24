@@ -17,7 +17,7 @@ module allocator #(
     // free interface
     input  logic                 free_req,
     input  logic [ID_WIDTH-1:0]  unique_id_to_free,
-    output logic [ID_WIDTH-1:0]  restored_id,
+    output logic [ID_WIDTH-1:0]  restored_id
     //output logic                 free_ack
 );
     localparam int ROW_W = $clog2(NUM_ROWS);
