@@ -205,8 +205,7 @@ module top_tb;
       end
 
       if ((axi_ar_out_if.valid & axi_ar_out_if.ready) == 1'b0) begin
-        $error("[%0t] TIMEOUT: AR ROB->SLAVE handshake FAILED "
-               "(no forwarded AR observed)", $time);
+        $error("[%0t] TIMEOUT: AR ROB->SLAVE handshake FAILED (no forwarded AR observed)", $time);
         disable capture_next_uid;
       end
 
@@ -248,8 +247,7 @@ module top_tb;
       end
 
       if ((axi_ar_in_if.valid & axi_ar_in_if.ready) == 1'b0) begin
-        $error("[%0t] TIMEOUT: AR MASTER->ROB handshake FAILED "
-               "(orig_id=%0d addr=%h len=%0d)",
+        $error("[%0t] TIMEOUT: AR MASTER->ROB handshake FAILED (orig_id=%0d addr=%h len=%0d)",
                $time, arid, addr, len);
         axi_ar_in_if.valid = 1'b0;
         disable send_read_req;
@@ -291,8 +289,7 @@ module top_tb;
       end
 
       if ((axi_r_in_if.valid & axi_r_in_if.ready) == 1'b0) begin
-        $error("[%0t] TIMEOUT: R SLAVE->ROB handshake FAILED "
-               "(uid=%0d data=%h)", $time, uid, data);
+        $error("[%0t] TIMEOUT: R SLAVE->ROB handshake FAILED (uid=%0d data=%h)", $time, uid, data);
         axi_r_in_if.valid = 1'b0;
         disable send_single_beat_rsp;
       end
@@ -334,8 +331,7 @@ module top_tb;
         end
 
         if ((axi_r_in_if.valid & axi_r_in_if.ready) == 1'b0) begin
-          $error("[%0t] TIMEOUT: R SLAVE->ROB handshake FAILED in burst "
-                 "(uid=%0d data=%h beat=%0d)", $time, uid, cur_data, i);
+          $error("[%0t] TIMEOUT: R SLAVE->ROB handshake FAILED in burst (uid=%0d data=%h beat=%0d)", $time, uid, cur_data, i);
           axi_r_in_if.valid = 1'b0;
           disable send_burst_rsp;
         end
