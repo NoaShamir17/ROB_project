@@ -4,12 +4,15 @@
 // ROLE
 //   • Per-UID storage of R beats.
 //   • r_in writes beats into FIFO[r_in.id].
-//   • alloc_req/uid_to_alloc marks "start of burst" for a UID
-//     (reset that UID's FIFO before writing the beat).
+//   • Start-of-burst for a UID is detected internally when that UID's
+//     beat_cnt == 0 and we accept a beat. alloc_req/uid_to_alloc are kept
+//     as inputs for compatibility / debug but are not relied on here,
+//     because in your system alloc_req = r_store.valid (every beat).
 //   • free_req/uid_to_free + r_out provide a *combinational* view of the
 //     head beat of FIFO[uid_to_free].
-//   • free_ack goes high when a beat is actually popped
-//     (free_req & !empty & r_out.ready) and stays high until clk↑.
+//   • free_ack goes high whenever there is a valid beat for this UID
+//     (free_ack = r_out.valid). The actual pop still happens on
+//     (r_out.valid & r_out.ready) inside the sequential logic.
 // ============================================================================
 
 module response_memory #(
@@ -29,14 +32,22 @@ module response_memory #(
     r_if.sender   r_out,
 
     // Control: start of burst for some UID
+    // NOTE: In your system these are wired from r_store:
+    //   alloc_req    = r_store.valid
+    //   uid_to_alloc = r_store.id
+    // We do NOT use them for the actual "new burst" decision (see below).
     input  logic [ID_WIDTH-1:0] uid_to_alloc,
     input  logic                alloc_req,
 
     // Control: pop one beat for some UID
+    // Typically:
+    //   free_req    = r_release.ready
+    //   uid_to_free = rm_release_uid
     input  logic [ID_WIDTH-1:0] uid_to_free,
     input  logic                free_req,
 
-    // Pop handshake (combinational: valid & ready)
+    // Pop indication to r_ordering_unit
+    // Architecturally: "there is a valid beat for this UID"
     output logic                free_ack
 );
 
@@ -64,7 +75,7 @@ module response_memory #(
         for (g = 0; g < NUM_UIDS; g = g + 1) begin : GEN_FLAGS
             always_comb begin
                 fifo_empty[g] = (beat_cnt[g] == {CNT_W{1'b0}});
-                fifo_full[g]  = (beat_cnt[g] == MAX_BEATS[CNT_W-1:0]);
+                fifo_full[g]  = (beat_cnt[g] == MAX_BEATS[CNT_W-1:0});
             end
         end
     endgenerate
@@ -75,19 +86,18 @@ module response_memory #(
     // --------------------------------------------------------------------
     // WRITE SIDE: r_in.valid / r_in.ready
     // --------------------------------------------------------------------
-    // Very simple policy:
-    //   • We ALWAYS allow a beat for in_uid as long as its FIFO is not full.
-    //   • If alloc_req==1 and uid_to_alloc==in_uid on that accepted beat,
-    //     we reset that UID's FIFO (start a new burst) *before* writing.
-    // No protocol checks beyond that (you control correctness upstream).
+    // Policy:
+    //   • Allow a beat as long as its FIFO is not full.
+    //   • "New burst" for a UID is detected when beat_cnt[in_uid] == 0
+    //     and we accept a beat. We reset that UID's FIFO pointers then.
+    //     This avoids relying on alloc_req, which is 1 for every beat
+    //     in your mapping (r_store.valid).
     // --------------------------------------------------------------------
 
     always_comb begin
         r_in.ready = 1'b1;
-        if (r_in.valid) begin
-            if (fifo_full[in_uid]) begin
-                r_in.ready = 1'b0;
-            end
+        if (r_in.valid && fifo_full[in_uid]) begin
+            r_in.ready = 1'b0;
         end
     end
 
@@ -97,10 +107,15 @@ module response_memory #(
     // READ / FREE SIDE: free_req + uid_to_free → r_out + free_ack
     // --------------------------------------------------------------------
     // Combinational view of the head of FIFO[uid_to_free]:
-    //   can_pop = FIFO not empty
-    //   r_out.valid = free_req & can_pop
-    //   r_out.* = mem[uid_to_free][rptr[uid_to_free]]
-    // free_ack is valid&ready (also combinational).
+    //   can_pop      = FIFO not empty
+    //   r_out.valid  = free_req & can_pop
+    //   r_out.*      = mem[uid_to_free][rptr[uid_to_free]]
+    //
+    // According to your spec:
+    //   free_ack = r_out.valid
+    // i.e. "there is a valid beat available for that UID".
+    // The actual pop (advancing rptr / decrementing beat_cnt) still happens
+    // only when valid & ready are both 1.
     // --------------------------------------------------------------------
 
     wire can_pop = ~fifo_empty[uid_to_free];
@@ -121,8 +136,8 @@ module response_memory #(
         end
     end
 
-    // free_ack is high whenever the pop handshake is complete
-    assign free_ack = r_out.valid & r_out.ready;
+    // free_ack now reflects "there is valid data" for this UID
+    assign free_ack = r_out.valid;
 
     // --------------------------------------------------------------------
     // SEQUENTIAL: commit writes and pops
@@ -140,12 +155,13 @@ module response_memory #(
         else begin
             // ---------------- WRITE PATH ----------------
             if (accept_in) begin
-                // If this beat is marked as "alloc" for this UID,
-                // reset that UID's FIFO before writing (start of burst).
-                if ((alloc_req == 1'b1) & (uid_to_alloc == in_uid)) begin
+                // NEW BURST detection:
+                // If this UID currently has zero beats stored, this is the
+                // first beat of a new burst – reset pointers before writing.
+                if (beat_cnt[in_uid] == {CNT_W{1'b0}}) begin
                     wptr[in_uid]     <= {CNT_W{1'b0}};
                     rptr[in_uid]     <= {CNT_W{1'b0}};
-                    beat_cnt[in_uid] <= {CNT_W{1'b0}};
+                    // beat_cnt[in_uid] already 0 here
                 end
 
                 // Write data/resp/last at current wptr
@@ -166,7 +182,8 @@ module response_memory #(
             end
 
             // ---------------- POP PATH -------------------
-            if (free_ack) begin
+            // Pop happens on real handshake: valid & ready
+            if (r_out.valid && r_out.ready) begin
                 // Pop from FIFO[uid_to_free]
 
                 // Advance read pointer (wrap)

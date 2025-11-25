@@ -3,7 +3,7 @@
 // ----------------------------------------------------------------------------
 // Description:
 //   Connects the AXI Read Address/Data channels to the reordering logic,
-//   utilizing FIFOs to decouple the flow stages and an allocator for unique IDs.
+//   utilizing FIFOs to decouple flow stages and an allocator for unique IDs.
 //
 // Component Flow:
 // 1. AXI Master (axi_ar_in) -> incoming_request_buffer
@@ -12,279 +12,300 @@
 // 4. outgoing_request_buffer -> AXI Slave (axi_ar_out)
 //
 // 5. AXI Slave (axi_r_in) -> incoming_response_buffer
-// 6. incoming_response_buffer -> r_ordering_unit (stores in response_memory/WM)
-// 7. r_ordering_unit -> outgoing_response_buffer (releases ordered data)
+// 6. incoming_response_buffer -> r_ordering_unit + response_memory
+// 7. r_ordering_unit -> outgoing_response_buffer
 // 8. outgoing_response_buffer -> AXI Master (axi_r_out)
 //
-// Allocator (allocator_tag_map) is shared by ar_ordering_unit (alloc) and
-// r_ordering_unit (free + restored ID lookup).
-
-//TODO: match all r_if and ar_if
-//TODO: implement everything marked as TODO in the code below
-//TODO: count how many cycles it takes for a request to go from axi_ar_in to axi_ar_out
-//TODO: count how many cycles it takes for a response to go from axi_r_in to axi_r_out
-//TODO: check if r_ordering_unit needs FSM like ar_ordering_unit
-//TODO: add the "last" signal to response_memory and every where it's missing and check what happens with multi-beat requests/responses
+// Allocator is shared by ar_ordering_unit (alloc) and r_ordering_unit (free).
+// AR and R roads are separated; only the allocator maps orig_id <-> UID.
 // ============================================================================
+
 module top #(
-    parameter int ID_WIDTH          = 4,
-    parameter int DATA_WIDTH        = 64,
-    parameter int RESP_WIDTH        = 2,
-    parameter int TAG_WIDTH         = 4,
-    parameter int ADDR_WIDTH        = 32,
-    parameter int MAX_OUTSTANDING   = 16,
-    parameter int MAX_LEN           = 8
+    parameter int ID_WIDTH        = 4,
+    parameter int DATA_WIDTH      = 64,
+    parameter int RESP_WIDTH      = 2,
+    parameter int TAG_WIDTH       = 4,   // currently unused; kept for TB compat
+    parameter int ADDR_WIDTH      = 32,
+    parameter int MAX_OUTSTANDING = 16,
+    parameter int MAX_LEN         = 8,
+
+    // FIFO depths – match your buffer modules' DEPTH param
+    parameter int REQ_FIFO_DEPTH  = 8,
+    parameter int RESP_FIFO_DEPTH = 8
 )(
     input  logic clk,
-    input  logic rst,
+    input  logic rst,   // active-high
 
-    // external AXI interfaces (these are interface-typed ports)
-    ar_if.receiver axi_ar_in,    // AXI master -> incoming request buffer
-    ar_if.sender   axi_ar_out,   // outgoing request -> AXI slave
+    // external AXI interfaces (interface-typed ports)
+    ar_if.receiver axi_ar_in,    // AXI master -> incoming_request_buffer
+    ar_if.sender   axi_ar_out,   // outgoing_request_buffer -> AXI slave
 
-    r_if.sender    axi_r_out,    // outgoing response -> AXI master
-    r_if.receiver  axi_r_in      // AXI slave -> incoming response buffer
+    r_if.sender    axi_r_out,    // outgoing_response_buffer -> AXI master
+    r_if.receiver  axi_r_in      // AXI slave -> incoming_response_buffer
 );
 
-    // derived widths
+    // ------------------------------------------------------------------------
+    // Local width parameters – must match ar_if / r_if definitions
+    // ------------------------------------------------------------------------
+    localparam int LEN_WIDTH   = 8;
+    localparam int SIZE_WIDTH  = 3;
+    localparam int BURST_WIDTH = 2;
+    localparam int QOS_WIDTH   = 4;
+
+    // for blocks that want conceptual rows/cols
     localparam int NUM_ROWS = MAX_OUTSTANDING;
     localparam int NUM_COLS = MAX_OUTSTANDING;
-    localparam int ROW_W = $clog2(NUM_ROWS);
-    localparam int COL_W = $clog2(NUM_COLS);
-    localparam int UID_W = ROW_W + COL_W;
 
-    // ---------------------------
+    // ------------------------------------------------------------------------
     // Internal interface instances
-    // ---------------------------
-    // ic_req: AXI AR after incoming_request_buffer -> input to ar_ordering_unit
+    // ------------------------------------------------------------------------
+
+    // AR: master -> incoming_request_buffer -> ar_ordering_unit -> outgoing_request_buffer
     ar_if #(
-        .ID_WIDTH(ID_WIDTH),
-        .ADDR_WIDTH(ADDR_WIDTH),
-        .LEN_WIDTH($clog2(MAX_LEN)) // TODO: confirm ar_if.len width param name/size
-    ) ic_req_if ();
+        .ID_WIDTH    (ID_WIDTH),
+        .ADDR_WIDTH  (ADDR_WIDTH),
+        .LEN_WIDTH   (LEN_WIDTH),
+        .SIZE_WIDTH  (SIZE_WIDTH),
+        .BURST_WIDTH (BURST_WIDTH),
+        .QOS_WIDTH   (QOS_WIDTH)
+    ) ar_to_order_if ();   // incoming_request_buffer -> ar_ordering_unit
 
-    // oc_req: output of ar_ordering_unit -> outgoing_request_buffer -> axi_ar_out
     ar_if #(
-        .ID_WIDTH(ID_WIDTH),        // TODO: ar_ordering_unit will write UID into id field: confirm width expectations (may need UID_W)
-        .ADDR_WIDTH(ADDR_WIDTH),
-        .LEN_WIDTH($clog2(MAX_LEN))
-    ) oc_req_if ();
+        .ID_WIDTH    (ID_WIDTH),
+        .ADDR_WIDTH  (ADDR_WIDTH),
+        .LEN_WIDTH   (LEN_WIDTH),
+        .SIZE_WIDTH  (SIZE_WIDTH),
+        .BURST_WIDTH (BURST_WIDTH),
+        .QOS_WIDTH   (QOS_WIDTH)
+    ) ar_from_order_if (); // ar_ordering_unit -> outgoing_request_buffer
 
-    // ic_resp: AXI R from slave -> incoming_response_buffer -> input to r_ordering_unit
+    // R: incoming_response_buffer -> r_ordering_unit -> outgoing_response_buffer
     r_if #(
-        .ID_WIDTH(UID_W),           // TODO: this must hold UID coming from AR path; if your r_if uses original ID width, change accordingly
-        .DATA_WIDTH(DATA_WIDTH),
-        .RESP_WIDTH(RESP_WIDTH),
-        .TAG_WIDTH(TAG_WIDTH)
-    ) ic_resp_if ();
+        .ID_WIDTH   (ID_WIDTH),      // carries UID (same width as allocator.unique_id)
+        .DATA_WIDTH (DATA_WIDTH),
+        .RESP_WIDTH (RESP_WIDTH)
+    ) r_to_order_if ();    // incoming_response_buffer -> r_ordering_unit
 
-    // oc_resp: output of r_ordering_unit -> outgoing_response_buffer -> axi_r_out
     r_if #(
-        .ID_WIDTH(ID_WIDTH),       // final outgoing response should have original master ID
-        .DATA_WIDTH(DATA_WIDTH),
-        .RESP_WIDTH(RESP_WIDTH),
-        .TAG_WIDTH(TAG_WIDTH)
-    ) oc_resp_if ();
+        .ID_WIDTH   (ID_WIDTH),
+        .DATA_WIDTH (DATA_WIDTH),
+        .RESP_WIDTH (RESP_WIDTH)
+    ) r_from_order_if ();  // r_ordering_unit -> outgoing_response_buffer
 
-    // ---------------------------
-    // Allocator wires (shared)
-    // ---------------------------
-    logic                 alloc_req;
-    logic [ID_WIDTH-1:0]  alloc_in_id;
-    logic                 alloc_gnt;
-    logic [UID_W-1:0]     alloc_unique_id;
-    logic                 id_matrix_full;  // produced by allocator
+    // Between r_ordering_unit and response_memory
+    r_if #(
+        .ID_WIDTH   (ID_WIDTH),      // UID width
+        .DATA_WIDTH (DATA_WIDTH),
+        .RESP_WIDTH (RESP_WIDTH)
+    ) rm_store_if ();      // r_ordering_unit.r_store  -> response_memory.r_in
 
-    logic                 free_req;
-    logic [UID_W-1:0]     free_unique_id;
-    logic [ID_WIDTH-1:0]  restored_id;
-    logic                 free_ack;        // optional
+    r_if #(
+        .ID_WIDTH   (ID_WIDTH),
+        .DATA_WIDTH (DATA_WIDTH),
+        .RESP_WIDTH (RESP_WIDTH)
+    ) rm_release_if ();    // response_memory.r_out    -> r_ordering_unit.r_release
 
-    // ---------------------------
-    // response_memory wires
-    // ---------------------------
-    // exact response_memory ports are tool-dependent; expose request/release control
-    logic                 wm_in_valid;
-    logic                 wm_in_ready;   // TODO: connect if response_memory exposes
-    logic [UID_W-1:0]     wm_in_uid;
-    logic [DATA_WIDTH-1:0] wm_in_data;
-    logic [RESP_WIDTH-1:0] wm_in_resp;
-    logic                 wm_in_last;
-    logic [ID_WIDTH-1:0]  wm_in_orig_id;
-    logic [TAG_WIDTH-1:0] wm_in_tagid;
+    // ------------------------------------------------------------------------
+    // Allocator / tag-map signals
+    // ------------------------------------------------------------------------
+    logic                alloc_req_ar;        // from ar_ordering_unit
+    logic                alloc_gnt;
+    logic [ID_WIDTH-1:0] alloc_in_id;
+    logic [ID_WIDTH-1:0] unique_id;
+    logic                id_matrix_full;
 
-    logic                 wm_alloc_req;
-    logic [UID_W-1:0]     wm_alloc_uid;
-    logic                 wm_alloc_gnt;
-    logic [DATA_WIDTH-1:0] wm_out_data;
-    logic [RESP_WIDTH-1:0] wm_out_resp;
-    logic                 wm_out_last;
-    logic [ID_WIDTH-1:0]  wm_out_orig_id;
-    logic [TAG_WIDTH-1:0] wm_out_tagid;
-    logic                 wm_full;
+    logic                allocator_free_req;  // from r_ordering_unit
+    logic [ID_WIDTH-1:0] uid_to_restore;
+    logic [ID_WIDTH-1:0] restored_id;
 
-    // -------------------------------------------------------------------------
-    // Instantiate the modules requested (connect interfaces where sensible).
-    // NOTE: exact port names / directions for these modules may differ in your
-    // repo. I use typical port names below. Wherever a port name/width is not
-    // known I added a //TODO: port unused/missing comment.
-    // -------------------------------------------------------------------------
+    // ------------------------------------------------------------------------
+    // response_memory control signals (from r_ordering_unit)
+    // ------------------------------------------------------------------------
+    logic [ID_WIDTH-1:0] rm_uid_to_alloc;
+    logic                rm_alloc_req;
+    logic [ID_WIDTH-1:0] rm_uid_to_free;
+    logic                rm_free_req;
+    logic                rm_free_ack;
 
-    // allocator
+    // r_ordering_unit’s bookkeeping UID (not used by response_memory directly)
+    logic [ID_WIDTH-1:0] rm_release_uid;
+
+    // ------------------------------------------------------------------------
+    // Allocator: maps original ID -> internal UID and back
+    // ------------------------------------------------------------------------
     allocator #(
-        .ID_WIDTH(ID_WIDTH),
-        .MAX_OUTSTANDING(MAX_OUTSTANDING)
+        .ID_WIDTH        (ID_WIDTH),
+        .MAX_OUTSTANDING (MAX_OUTSTANDING)
+        // NUM_ROWS / NUM_COLS use allocator defaults
     ) u_allocator (
-        .clk               (clk),
-        .rst               (rst),
-        .alloc_req         (alloc_req),
-        .in_orig_id        (alloc_in_id),
-        .alloc_gnt         (alloc_gnt),
-        .unique_id         (alloc_unique_id),
-        .id_matrix_full    (id_matrix_full),
-        .free_req          (free_req),
-        .unique_id_to_free (free_unique_id),
-        .restored_id       (restored_id)
-        // .free_ack       (free_ack) // TODO: port unused/missing if allocator supports free_ack
+        .clk              (clk),
+        .rst              (rst),
+
+        // alloc path (AR side)
+        .alloc_req        (alloc_req_ar),
+        .in_orig_id       (alloc_in_id),
+        .alloc_gnt        (alloc_gnt),
+        .unique_id        (unique_id),
+        .id_matrix_full   (id_matrix_full),
+
+        // free path (R side)
+        .free_req         (allocator_free_req),
+        .unique_id_to_free(uid_to_restore),
+        .restored_id      (restored_id)
+        // .free_ack unused
     );
 
-    // incoming_request_buffer: connect external axi_ar_in -> ic_req_if
-    incoming_request_buffer #(/* TODO: add params if module is parameterized */) u_incoming_request_buffer (
-        .clk     (clk),
-        .rst     (rst),
-        .in_if   (axi_ar_in),   // TODO: if module expects modport type name different, update
-        .out_if  (ic_req_if)
+    // ------------------------------------------------------------------------
+    // AR path
+    // ------------------------------------------------------------------------
+
+    // incoming_request_buffer: AXI master -> ar_ordering_unit
+    incoming_request_buffer #(
+        .ID_WIDTH    (ID_WIDTH),
+        .ADDR_WIDTH  (ADDR_WIDTH),
+        .LEN_WIDTH   (LEN_WIDTH),
+        .SIZE_WIDTH  (SIZE_WIDTH),
+        .BURST_WIDTH (BURST_WIDTH),
+        .QOS_WIDTH   (QOS_WIDTH),
+        .DEPTH       (REQ_FIFO_DEPTH)
+    ) u_incoming_request_buffer (
+        .clk   (clk),
+        .rst   (rst),
+        .ar_in (axi_ar_in),        // external AR in
+        .ar_out(ar_to_order_if)    // to ar_ordering_unit
     );
 
-    // outgoing_request_buffer: connect oc_req_if -> external axi_ar_out
-    outgoing_request_buffer #(/* TODO: params */) u_outcoming_request_buffer (
-        .clk     (clk),
-        .rst     (rst),
-        .in_if   (oc_req_if),
-        .out_if  (axi_ar_out)
-    );
-
-    // ar_ordering_unit: get UIDs from allocator; s_ar = ic_req_if, m_ar = oc_req_if
+    // ar_ordering_unit: replaces original ID with UID from allocator
     ar_ordering_unit #(
-        .ID_WIDTH(ID_WIDTH),
-        .MAX_OUTSTANDING(MAX_OUTSTANDING)
-        // TODO: add other params (UID width etc.) if module defines them
-    ) u_ar_id_ordering_unit (
-        .clk         (clk),
-        .rst         (rst),
-        .s_ar        (ic_req_if),   // receiver modport expected by unit
-        .m_ar        (oc_req_if),   // sender modport expected by unit
-
-        // allocator handshake (names must match unit's ports)
-        .alloc_req   (alloc_req),       // TODO: port name check
-        .alloc_in_id (alloc_in_id),     // TODO: port name check
-        .alloc_gnt   (alloc_gnt),       // TODO: port name check
-        .unique_id   (alloc_unique_id)  // TODO: port name check
-    );
-
-    // incoming_response_buffer: connect external axi_r_in -> ic_resp_if
-    incoming_response_buffer #(/* TODO: params */) u_incoming_response_buffer (
-        .clk     (clk),
-        .rst     (rst),
-        .in_if   (axi_r_in),
-        .out_if  (ic_resp_if)
-    );
-
-    // outgoing_response_buffer: connect oc_resp_if -> external axi_r_out
-    outgoing_response_buffer #(/* TODO: params */) u_outcoming_response_buffer (
-        .clk     (clk),
-        .rst     (rst),
-        .in_if   (oc_resp_if),
-        .out_if  (axi_r_out)
-    );
-
-    // response_memory: store partial/multi-beat responses (ports vary across your file)
-    response_memory #(
-        .NUM_ROWS(NUM_ROWS),
-        .NUM_COLS(NUM_COLS),
-        .MAX_REQ(MAX_OUTSTANDING),
-        .DATA_WIDTH(DATA_WIDTH),
-        .RESP_WIDTH(RESP_WIDTH),
-        .ID_WIDTH(ID_WIDTH),
-        .TAG_WIDTH(TAG_WIDTH)
-    ) u_response_memory (
-        .clk         (clk),
-        .rst         (rst),
-
-        // write path: driven by r_ordering_unit's "store" handshake
-        .in_valid    (wm_in_valid),    // TODO: connect to r_ordering_unit store-valid
-        .in_ready    (wm_in_ready),    // TODO: check if response_memory exposes in_ready
-        .in_uid      (wm_in_uid),      // UID
-        .in_data     (wm_in_data),
-        .in_resp     (wm_in_resp),
-        .in_last     (wm_in_last),
-        .in_orig_id  (wm_in_orig_id),
-        .in_tagid    (wm_in_tagid),
-
-        // release (alloc) request from r_ordering_unit
-        .alloc_req   (wm_alloc_req),   // r_ordering_unit asks park to release next ordered resp
-        .alloc_uid   (wm_alloc_uid),   // requested UID to release
-        .alloc_gnt   (wm_alloc_gnt),
-        .out_data    (wm_out_data),
-        .out_resp    (wm_out_resp),
-        .out_last    (wm_out_last),
-        .out_orig_id (wm_out_orig_id),
-        .out_tagid   (wm_out_tagid),
-
-        .free_req    (free_req),        // free request from r_ordering_unit -> allocator
-        .id_to_release (free_unique_id),
-        .full        (wm_full)
-        // .free_ack  () // TODO: if response_memory exposes free_ack, connect or mark unused
-    );
-
-    // r_ordering_unit: read from ic_resp_if, write to response_memory and/or oc_resp_if
-    r_ordering_unit #(
-        .ID_WIDTH(ID_WIDTH),
-        .MAX_OUTSTANDING(MAX_OUTSTANDING),
-        .NUM_ROWS(NUM_ROWS),
-        .NUM_COLS(NUM_COLS)
-        // TODO: add UID width param if unit defines it
-    ) u_r_ordering_unit (
+        .ID_WIDTH    (ID_WIDTH),
+        .ADDR_WIDTH  (ADDR_WIDTH),
+        .LEN_WIDTH   (LEN_WIDTH),
+        .SIZE_WIDTH  (SIZE_WIDTH),
+        .BURST_WIDTH (BURST_WIDTH),
+        .QOS_WIDTH   (QOS_WIDTH)
+    ) u_ar_ordering_unit (
         .clk          (clk),
         .rst          (rst),
 
-        // response input (from ic_resp_if)
-        .r_in         (ic_resp_if),
+        .ar_in        (ar_to_order_if),
+        .ar_out       (ar_from_order_if),
 
-        // response output (to oc_resp_if)
-        .r_out        (oc_resp_if),
-
-        // response-park handshake (store releases)
-        .wm_write_en  (wm_in_valid),    // TODO: exact port names may differ
-        .wm_write_uid (wm_in_uid),
-        .wm_write_data_id   (wm_in_orig_id), // TODO: many modules expose structured ports; adapt as needed
-        .wm_write_data_data (wm_in_data),
-        .wm_write_data_resp (wm_in_resp),
-        .wm_write_data_last (wm_in_last),
-        .wm_write_data_tag  (wm_in_tagid),
-
-        .wm_release_en (wm_alloc_req),
-        .wm_release_uid (wm_alloc_uid),
-        .wm_release_gnt (wm_alloc_gnt), // TODO: may be output from response_memory instead
-
-        // allocator free request (when a UID is finished and can be freed)
-        .free_req     (free_req),
-        .free_uid     (free_unique_id),
-
-        // restored id from allocator (if r_ordering_unit needs lookups)
-        .restored_id  (restored_id) // TODO: ensure r_ordering_unit has this input
+        // allocator handshake
+        .alloc_req    (alloc_req_ar),
+        .alloc_gnt    (alloc_gnt),
+        .alloc_in_id  (alloc_in_id),
+        .unique_id    (unique_id),
+        .tag_map_full (id_matrix_full)
     );
 
-    // connect response_memory release outputs into oc_resp_if (if not done inside r_ordering_unit)
-    // Common patterns:
-    // - r_ordering_unit asks park to release and then forwards park's out_* into its r_out -> oc_resp_if
-    // If your r_ordering_unit does NOT forward park outputs, you need to add assigns here.
-    // Example (uncomment/adapt if needed):
-    // assign oc_resp_if.id   = wm_out_orig_id;
-    // assign oc_resp_if.data = wm_out_data;
-    // assign oc_resp_if.resp = wm_out_resp;
-    // assign oc_resp_if.last = wm_out_last;
-    // assign oc_resp_if.tagid= wm_out_tagid;
-    // // and drive oc_resp_if.valid from wm_alloc_gnt / r_ordering_unit release handshake
+    // outgoing_request_buffer: ar_ordering_unit -> AXI slave
+    outgoing_request_buffer #(
+        .ID_WIDTH    (ID_WIDTH),
+        .ADDR_WIDTH  (ADDR_WIDTH),
+        .LEN_WIDTH   (LEN_WIDTH),
+        .SIZE_WIDTH  (SIZE_WIDTH),
+        .BURST_WIDTH (BURST_WIDTH),
+        .QOS_WIDTH   (QOS_WIDTH),
+        .DEPTH       (REQ_FIFO_DEPTH)
+    ) u_outgoing_request_buffer (
+        .clk   (clk),
+        .rst   (rst),
+        .ar_in (ar_from_order_if),
+        .ar_out(axi_ar_out)
+    );
+
+    // ------------------------------------------------------------------------
+    // R path
+    // ------------------------------------------------------------------------
+
+    // incoming_response_buffer: AXI slave -> r_ordering_unit
+    incoming_response_buffer #(
+        .ID_WIDTH    (ID_WIDTH),     // UID width on R channel
+        .DATA_WIDTH  (DATA_WIDTH),
+        .RESP_WIDTH  (RESP_WIDTH),
+        .DEPTH       (RESP_FIFO_DEPTH)
+    ) u_incoming_response_buffer (
+        .clk   (clk),
+        .rst   (rst),
+        .r_in  (axi_r_in),
+        .r_out (r_to_order_if)
+    );
+
+    // response_memory: per-UID storage of response beats
+    response_memory #(
+        .NUM_UIDS   (MAX_OUTSTANDING),
+        .MAX_BEATS  (MAX_LEN),
+        .ID_WIDTH   (ID_WIDTH),      // UID width
+        .DATA_WIDTH (DATA_WIDTH),
+        .RESP_WIDTH (RESP_WIDTH)
+    ) u_response_memory (
+        .clk         (clk),
+        .rst_n       (~rst),
+
+        // write side from r_ordering_unit
+        .r_in        (rm_store_if),
+
+        // read side toward r_ordering_unit
+        .r_out       (rm_release_if),
+
+        // Control: start of burst for some UID
+        .uid_to_alloc(rm_uid_to_alloc),
+        .alloc_req   (rm_alloc_req),
+
+        // Control: pop one beat for some UID
+        .uid_to_free (rm_uid_to_free),
+        .free_req    (rm_free_req),
+
+        // Pop handshake (combinational: valid & ready)
+        .free_ack    (rm_free_ack)
+    );
+
+    // r_ordering_unit: enforces per-original-ID ordering and interacts with
+    // allocator (for freeing UIDs) and response_memory (via r_store/r_release).
+    r_ordering_unit #(
+        .ID_WIDTH        (ID_WIDTH),
+        .MAX_OUTSTANDING (MAX_OUTSTANDING),
+        .NUM_ROWS        (NUM_ROWS),
+        .NUM_COLS        (NUM_COLS),
+        .MAX_LEN         (MAX_LEN)
+    ) u_r_ordering_unit (
+        .clk              (clk),
+        .rst              (rst),
+
+        // from incoming_response_buffer (R from fabric)
+        .r_in             (r_to_order_if),
+
+        // to outgoing_response_buffer (R to AXI master)
+        .r_out            (r_from_order_if),
+
+        // allocator: free UID when its response burst is fully drained
+        .allocator_free_req(allocator_free_req),
+        .uid_to_restore   (uid_to_restore),
+        .restored_id      (restored_id),
+
+        // response_memory data paths
+        .r_store          (rm_store_if),      // writes beats into response_memory
+        .rm_release_uid   (rm_release_uid),   // internal bookkeeping; not used by RM
+        .r_release        (rm_release_if),    // reads beats from response_memory
+
+        // response_memory control (ports you added with //ADAM SUGGESTION)
+        .uid_to_alloc     (rm_uid_to_alloc),
+        .alloc_req        (rm_alloc_req),
+        .uid_to_free      (rm_uid_to_free),
+        .free_req         (rm_free_req)
+    );
+
+    // outgoing_response_buffer: r_ordering_unit -> AXI master
+    outgoing_response_buffer #(
+        .ID_WIDTH    (ID_WIDTH),
+        .DATA_WIDTH  (DATA_WIDTH),
+        .RESP_WIDTH  (RESP_WIDTH),
+        .DEPTH       (RESP_FIFO_DEPTH)
+    ) u_outgoing_response_buffer (
+        .clk   (clk),
+        .rst   (rst),
+        .r_in  (r_from_order_if),
+        .r_out (axi_r_out)
+    );
 
 endmodule

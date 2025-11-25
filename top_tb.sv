@@ -17,6 +17,10 @@ module top_tb;
   localparam int BURST_WIDTH = 2;
   localparam int QOS_WIDTH   = 4;
 
+  // FIFO depths – must match top.sv params
+  localparam int REQ_FIFO_DEPTH  = 8;
+  localparam int RESP_FIFO_DEPTH = 8;
+
   // Timeout in cycles for any handshake
   localparam int TIMEOUT_CYCLES = 1000;
 
@@ -80,7 +84,9 @@ module top_tb;
     .TAG_WIDTH       (TAG_WIDTH),
     .ADDR_WIDTH      (ADDR_WIDTH),
     .MAX_OUTSTANDING (MAX_OUTSTANDING),
-    .MAX_LEN         (MAX_LEN)
+    .MAX_LEN         (MAX_LEN),
+    .REQ_FIFO_DEPTH  (REQ_FIFO_DEPTH),
+    .RESP_FIFO_DEPTH (RESP_FIFO_DEPTH)
   ) dut (
     .clk        (clk),
     .rst        (rst),
