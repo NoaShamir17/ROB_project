@@ -171,8 +171,7 @@ module top_tb;
                  $time, tag, exp_count);
       end
       else begin
-        $error("[%0t] TIMEOUT: R ROB->MASTER did not produce all expected beats "
-               "in scenario %s (seen %0d / %0d)",
+        $error("[%0t] TIMEOUT: R ROB->MASTER did not produce all expected beats in scenario %s (seen %0d / %0d)",
                $time, tag, exp_index, exp_count);
       end
     end
