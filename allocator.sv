@@ -23,7 +23,7 @@ module allocator #(
     localparam int ROW_W = $clog2(NUM_ROWS);
     localparam int COL_W = $clog2(NUM_COLS);
     localparam int PER_ROW_CNT_W = $clog2(NUM_COLS+1); //width of per-row outstanding-request counter
-    localparam int TOT_REQ_CNT_W = $clog2(MAX_OUSTSTANDING + 1); //width of total outstanding-request counter
+    localparam int TOT_REQ_CNT_W = $clog2(MAX_OUTSTANDING + 1); //width of total outstanding-request counter
 
     logic [ID_WIDTH-1:0]       id_matrix [NUM_ROWS][NUM_COLS]; // ID matrix storage 
                                                                 //id_matrix[r][c] holds the original ID of the allocated unique ID {r,c}
