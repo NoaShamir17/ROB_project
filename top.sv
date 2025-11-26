@@ -21,7 +21,7 @@
 // ============================================================================
 
 module top #(
-    parameter int ID_WIDTH        = 4,
+    parameter int ID_WIDTH        = 32,
     parameter int DATA_WIDTH      = 64,
     parameter int RESP_WIDTH      = 2,
     parameter int TAG_WIDTH       = 4,   // currently unused; kept for TB compat
@@ -121,10 +121,10 @@ module top #(
     // ------------------------------------------------------------------------
     // response_memory control signals (from r_ordering_unit)
     // ------------------------------------------------------------------------
-    logic [ID_WIDTH-1:0] rm_uid_to_alloc;
-    logic                rm_alloc_req;
-    logic [ID_WIDTH-1:0] rm_uid_to_free;
-    logic                rm_free_req;
+    //logic [ID_WIDTH-1:0] rm_uid_to_alloc;
+    //logic                rm_alloc_req;
+    //logic [ID_WIDTH-1:0] rm_uid_to_free;
+    //logic                rm_free_req;
     logic                rm_free_ack;
 
     // r_ordering_unit’s bookkeeping UID (not used by response_memory directly)
@@ -231,6 +231,8 @@ module top #(
         .r_out (r_to_order_if)
     );
 
+
+
     // response_memory: per-UID storage of response beats
     response_memory #(
         .NUM_UIDS   (MAX_OUTSTANDING),
@@ -248,17 +250,18 @@ module top #(
         // read side toward r_ordering_unit
         .r_out       (rm_release_if),
 
-        // Control: start of burst for some UID
-        .uid_to_alloc(rm_uid_to_alloc),
-        .alloc_req   (rm_alloc_req),
 
         // Control: pop one beat for some UID
-        .uid_to_free (rm_uid_to_free),
-        .free_req    (rm_free_req),
+        .uid_to_free (uid_to_restore)
+
 
         // Pop handshake (combinational: valid & ready)
-        .free_ack    (rm_free_ack)
+        //.free_ack    (rm_free_ack)
     );
+
+
+
+
 
     // r_ordering_unit: enforces per-original-ID ordering and interacts with
     // allocator (for freeing UIDs) and response_memory (via r_store/r_release).
@@ -286,13 +289,8 @@ module top #(
         // response_memory data paths
         .r_store          (rm_store_if),      // writes beats into response_memory
         .rm_release_uid   (rm_release_uid),   // internal bookkeeping; not used by RM
-        .r_release        (rm_release_if),    // reads beats from response_memory
+        .r_release        (rm_release_if)    // reads beats from response_memory
 
-        // response_memory control (ports you added with //ADAM SUGGESTION)
-        .uid_to_alloc     (rm_uid_to_alloc),
-        .alloc_req        (rm_alloc_req),
-        .uid_to_free      (rm_uid_to_free),
-        .free_req         (rm_free_req)
     );
 
     // outgoing_response_buffer: r_ordering_unit -> AXI master
