@@ -1,0 +1,26 @@
+set -e
+
+vlogan -kdb -sverilog -full64 ar_if.sv
+vlogan -kdb -sverilog -full64 r_if.sv
+
+vlogan -kdb -sverilog -full64 allocator.sv
+
+vlogan -kdb -sverilog -full64 incoming_request_buffer.sv
+vlogan -kdb -sverilog -full64 outgoing_request_buffer.sv
+vlogan -kdb -sverilog -full64 incoming_response_buffer.sv
+vlogan -kdb -sverilog -full64 outgoing_response_buffer.sv
+
+vlogan -kdb -sverilog -full64 ar_ordering_unit.sv
+vlogan -kdb -sverilog -full64 r_ordering_unit.sv
+vlogan -kdb -sverilog -full64 response_memory.sv
+
+vlogan -kdb -sverilog -full64 top.sv
+vlogan -kdb -sverilog -full64 top_tb.sv
+
+vcs -kdb -debug_access+all -full64 top_tb -o simv
+
+./simv
+
+
+chmod +x build_and_run.sh
+./build_and_run.sh
