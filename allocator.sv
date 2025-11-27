@@ -12,7 +12,7 @@ module allocator #(
     input  logic [ID_WIDTH-1:0]  in_orig_id,
     output logic                 alloc_gnt,
     output logic [ID_WIDTH-1:0]     unique_id,
-    output logic                 id_matrix_full, 
+    output logic                 id_matrix_full,
 
     // free interface
     input  logic                 free_req,
@@ -25,7 +25,7 @@ module allocator #(
     localparam int PER_ROW_CNT_W = $clog2(NUM_COLS+1); //width of per-row outstanding-request counter
     localparam int TOT_REQ_CNT_W = $clog2(MAX_OUTSTANDING + 1); //width of total outstanding-request counter
 
-    logic [ID_WIDTH-1:0]       id_matrix [NUM_ROWS][NUM_COLS]; // ID matrix storage 
+    logic [ID_WIDTH-1:0]       id_matrix [NUM_ROWS][NUM_COLS]; // ID matrix storage
                                                                 //id_matrix[r][c] holds the original ID of the allocated unique ID {r,c}
     logic                      id_matrix_we [NUM_ROWS][NUM_COLS]; // write-enable for id matrix (single entry on alloc)
 
@@ -49,7 +49,7 @@ module allocator #(
     logic [TOT_REQ_CNT_W-1:0]           tot_used_count_current;
     logic [TOT_REQ_CNT_W-1:0]           tot_used_count_next;
 
-    assign id_matrix_full = (used_count_current == TOT_REQ_CNT_W'(MAX_OUTSTANDING));
+    assign id_matrix_full = (tot_used_count_current == TOT_REQ_CNT_W'(MAX_OUTSTANDING));
 
     // ---------------------------------------------------------------------
     // row selection logic
@@ -61,16 +61,50 @@ module allocator #(
     logic [NUM_ROWS-1:0] row_bound_to_in_id; // index of row bound to in_orig_id is high
     logic             have_unbound_row; // is there any unbound row
     logic [ROW_W-1:0] first_unbound_row_idx; // index of first unbound row (if any)
-    logic [NUM_ROWS-1:0] first_unbound_row; // index of first unbound row is high 
+    logic [NUM_ROWS-1:0] first_unbound_row; // index of first unbound row is high
     logic [ROW_W-1:0] chosen_row_idx;
     logic [COL_W-1:0] chosen_col_idx;
 
-        
+    // ---------------------------------------------------------------------
+    // free id logic
+    // ---------------------------------------------------------------------
+
+    // decode unique_id_to_free
+    logic [ROW_W-1:0] free_row_idx;
+    logic [COL_W-1:0] free_col_idx;
+
+    assign free_row_idx = unique_id_to_free[ROW_W+COL_W-1 : COL_W];
+    assign free_col_idx = unique_id_to_free[COL_W-1 : 0];
+    assign restored_id = id_matrix[free_row_idx][free_col_idx];
+
+       
     // allocation signals
     assign alloc_gnt = alloc_req & (have_row_hit | have_unbound_row) & ~id_matrix_full;
     assign unique_id = {{(ID_WIDTH-ROW_W-COL_W){1'b0}},chosen_row_idx, chosen_col_idx};//unique_id is zero-padded to ID_WIDTH
 
     // slot selection combinational logic
+
+
+    // ---------------------------------------------------------
+    // Generate Loop Implementation (Outside always_comb)
+    // ---------------------------------------------------------
+    genvar i; // Use genvar for generate loops
+    generate
+        for (i = 0; i < NUM_ROWS; i++) begin : gen_find_unbound
+            if (i == 0) begin
+                // Base case: First row is "first unbound" if it's not bound
+                assign first_unbound_row[0] = ~row_is_bound_current[0];
+            end
+            else begin
+                // Standard case: Row 'i' is "first unbound" if:
+                // 1. It is not bound ITSELF
+                // 2. AND ALL previous rows (0 to i-1) ARE bound
+                assign first_unbound_row[i] = ~row_is_bound_current[i] & (&row_is_bound_current[i-1:0]);
+            end
+        end
+    endgenerate
+
+   
     always_comb begin : slot_selection_logic
         // defaults
         have_row_hit        = 1'b0;
@@ -102,13 +136,6 @@ module allocator #(
             end
 
             //second - find first unbound row
-            if(r == 0) begin
-                first_unbound_row[0] = ~row_is_bound_current[0];
-            end
-            else begin
-                first_unbound_row[r] = ~row_is_bound_current[r] & (&row_is_bound_current[r-1:0]);
-            end
-
             if (first_unbound_row[r]) begin
                 first_unbound_row_idx = ROW_W'(r);
             end
@@ -119,7 +146,7 @@ module allocator #(
         chosen_row_idx = have_row_hit ? hit_row_idx : first_unbound_row_idx;
         chosen_col_idx = available_col_current[chosen_row_idx];
 
-        // on alloc grant, update state
+        // on alloc grant, upallocdate state
         if (alloc_gnt) begin
             //if row was unbound, bind it
             if (~have_row_hit) begin
@@ -127,7 +154,7 @@ module allocator #(
                 bound_orig_id_next[chosen_row_idx] = in_orig_id;
             end
 
-            // update available col pointer
+            // set id matrix write enable // update available col pointer
             //notice that available_cil_next will wrap around automatically due to bitwidth
             available_col_next[chosen_row_idx] = available_col_current[chosen_row_idx] + COL_W'(1);
 
@@ -136,29 +163,7 @@ module allocator #(
 
         end
 
-    end
-
-
-
-
-    // ---------------------------------------------------------------------
-    // free id logic
-    // ---------------------------------------------------------------------
-
-    // decode unique_id_to_free
-    logic [ROW_W-1:0] free_row_idx;
-    logic [COL_W-1:0] free_col_idx;
-
-    assign free_row_idx = unique_id_to_free[ROW_W+COL_W-1 : COL_W];
-    assign free_col_idx = unique_id_to_free[COL_W-1 : 0];
-    assign restored_id = id_matrix[free_row_idx][free_col_idx];
-
-    always_comb begin : free_logic
-        // default
-        //free_ack    = 1'b0; // registered in always_ff below (mirror)
-
-        // on free request, update state
-        if (free_req) begin
+	if (free_req) begin
             //free_ack = 1'b1;
 
             // if this was the last outstanding in the row, unbind the row
@@ -168,7 +173,14 @@ module allocator #(
                 available_col_next[free_row_idx] = '0;
             end
         end
+
     end
+
+
+
+
+    
+    
 
     // -----------------------------------------------------
     //counter logic
@@ -229,3 +241,6 @@ module allocator #(
     end
 
 endmodule
+
+
+

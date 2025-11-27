@@ -75,7 +75,7 @@ module response_memory #(
         for (g = 0; g < NUM_UIDS; g = g + 1) begin : GEN_FLAGS
             always_comb begin
                 fifo_empty[g] = (beat_cnt[g] == {CNT_W{1'b0}});
-                fifo_full[g]  = (beat_cnt[g] == MAX_BEATS[CNT_W-1:0});
+                fifo_full[g]  = (beat_cnt[g] == MAX_BEATS[CNT_W-1:0]);
             end
         end
     endgenerate

@@ -1,5 +1,5 @@
 module r_ordering_unit #(
-    parameter int ID_WIDTH         = 4,   // original ID width
+    parameter int ID_WIDTH         = 32,   // original ID width
     parameter int MAX_OUTSTANDING  = 16,
     parameter int NUM_ROWS = MAX_OUTSTANDING,
     parameter int NUM_COLS = MAX_OUTSTANDING,
@@ -58,7 +58,7 @@ module r_ordering_unit #(
 
 
     // Decode uid
-    logic [ROW_W-1:0] resp_row = r_in.id[ID_WIDTH-1:COL_W];
+    logic [ROW_W-1:0] resp_row = r_in.id[ROW_W+COL_W-1:COL_W];
     logic [COL_W-1:0] resp_col = r_in.id[COL_W-1:0];
 
     // =========================================================================
@@ -73,47 +73,61 @@ module r_ordering_unit #(
     logic [NUM_ROWS-1:0] rm_hit_vec; // one-hot per row if that row has a hit
     logic [NUM_ROWS-1:0] rm_first_row; // vector marking first row with a hit (only one bit set to 1)
     logic [ID_WIDTH-1:0] rm_uid [NUM_ROWS-1:0]; // uid per row for hit checking
-    
-    
+   
+   
     //----------direct hit logic----------
     // direct hit if resp_col matches release_idx of that row
     // AND if not waiting in rm (no earlier beats pending)
-    assign direct_hit = r_in.valid & 
+    assign direct_hit = r_in.valid &
                          ~|(resp_col ^ release_idx[resp_row]) &
                          ~waiting_map[resp_row][resp_col]; // direct hit if resp_col matches release_idx of that row
-    
+   
 
     //----------waiting memory hit logic----------
     // Priority-encode first row with a hit
+
+// =========================================================================
+    // Waiting memory hit logic (Priority Encoder using Generate)
+    // =========================================================================
+   
+    // 1. Generate Loop: Calculate hit vectors and One-Hot priority
+    //    We move this logic OUT of always_comb so we can use constant ranges.
+    genvar g_r;
+    generate
+        for (g_r = 0; g_r < NUM_ROWS; g_r++) begin : gen_priority_logic
+            // Check if this row has a waiting hit
+            assign rm_hit_vec[g_r] = waiting_map[g_r][release_idx[g_r]];
+
+            // Priority Logic: Is this the FIRST row with a hit?
+            if (g_r == 0) begin
+                // Base case: First row is "first" if it has a hit
+                assign rm_first_row[0] = rm_hit_vec[0];
+            end else begin
+                // Recursive step: Row is "first" if it has a hit AND no previous rows had hits.
+                // Because g_r is a genvar, [g_r-1 : 0] is a valid constant range.
+                assign rm_first_row[g_r] = rm_hit_vec[g_r] & (~|rm_hit_vec[g_r-1:0]);
+            end
+
+            // Calculate the candidate UID for this row
+            assign rm_uid[g_r] = { ROW_W'(g_r), release_idx[g_r] };
+        end
+    endgenerate
+
+    // 2. Combinational Logic: Select the final UID
+    //    We just OR together the masked results.
     always_comb begin
-        // defaults
         rm_hit_uid = '0;
-
-        for (int r = 0; r < NUM_ROWS; r++) begin : gen_rm_hit_vec
-            rm_hit_vec[r] = waiting_map[r][release_idx[r]]; // high when that row has a hit
-
-            //first row logic
-            if (r == 0) begin
-                rm_first_row[0] = rm_hit_vec[0];
-            end
-            else begin
-                //high when this row has a hit and no prior row has a hit
-                rm_first_row[r] = rm_hit_vec[r] & (~|rm_hit_vec[r-1:0]);
-            end
-
-            //uid per row
-            rm_uid[r] = {r[ROW_W-1:0], release_idx[r]};
-
-            //choose the uid from the first row with a hit
+       
+        // Loop to aggregate results (rm_first_row is One-Hot, so only one valid entry)
+        for (int r = 0; r < NUM_ROWS; r++) begin
             rm_hit_uid = rm_hit_uid | (rm_uid[r] & {ID_WIDTH{rm_first_row[r]}});
-
-        end 
+        end
     end
 
     assign rm_hit = |rm_hit_vec;
-    logic [ROW_W-1:0] rm_row = rm_hit_uid[ID_WIDTH-1:COL_W];
+    logic [ROW_W-1:0] rm_row = rm_hit_uid[ROW_W+COL_W-1:COL_W];
     logic [COL_W-1:0] rm_col = rm_hit_uid[COL_W-1:0];
-                    
+                   
 
     // =========================================================================
     // Release and store path
@@ -168,7 +182,7 @@ module r_ordering_unit #(
 
             //allocator signals
             uid_to_restore = r_in.id;
-            
+           
             // response output signals
             r_out.id        = restored_id;
             r_out.data      = r_in.data;
@@ -200,7 +214,7 @@ module r_ordering_unit #(
 
                 // allocator signals
                 uid_to_restore = rm_hit_uid;
-            
+           
                 // response output signals
                 r_out.id        = restored_id;
                 r_out.data      = r_release.data;
@@ -226,12 +240,12 @@ module r_ordering_unit #(
             if (hs_out) begin
                 //handshake on output - update pointers and waiting map
                 if (direct_hit & hs_in) begin
-                    // Increment release pointer for that row 
+                    // Increment release pointer for that row
                     // wrap-around handled by bit-width
                     release_idx[resp_row] <= release_idx[resp_row] + 1'b1;
                 end
                 else if (rm_hit & hs_release) begin
-                    // Increment release pointer for that row 
+                    // Increment release pointer for that row
                     release_idx[rm_row] <= release_idx[rm_row] + 1'b1;
                     // Decrement waiting beats count for that entry
                     waiting_beats_count[resp_row][resp_col] <= waiting_beats_count[resp_row][resp_col] - 1'b1;
@@ -247,3 +261,6 @@ module r_ordering_unit #(
     end
 
 endmodule
+
+
+

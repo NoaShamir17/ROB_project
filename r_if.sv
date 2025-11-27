@@ -1,6 +1,6 @@
 // AXI Read Data Channel interface with sender/receiver modports
 interface r_if #(
-    parameter ID_WIDTH    = 4,    // width of the transaction ID
+    parameter ID_WIDTH    = 32,    // width of the transaction ID
     parameter DATA_WIDTH  = 64,   // width of the data bus
     parameter RESP_WIDTH  = 2    // width of the response field (usually 2 bits)
 );
