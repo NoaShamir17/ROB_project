@@ -36,19 +36,19 @@ module response_memory #(
     //   alloc_req    = r_store.valid
     //   uid_to_alloc = r_store.id
     // We do NOT use them for the actual "new burst" decision (see below).
-    input  logic [ID_WIDTH-1:0] uid_to_alloc,
-    input  logic                alloc_req,
+    //input  logic [ID_WIDTH-1:0] uid_to_alloc,
+    //input  logic                alloc_req,
 
     // Control: pop one beat for some UID
     // Typically:
     //   free_req    = r_release.ready
     //   uid_to_free = rm_release_uid
-    input  logic [ID_WIDTH-1:0] uid_to_free,
-    input  logic                free_req,
+    input  logic [ID_WIDTH-1:0] uid_to_free
+    //input  logic                free_req,
 
     // Pop indication to r_ordering_unit
     // Architecturally: "there is a valid beat for this UID"
-    output logic                free_ack
+    //output logic                free_ack
 );
 
     // --------------------------------------------------------------------
@@ -121,7 +121,7 @@ module response_memory #(
     wire can_pop = ~fifo_empty[uid_to_free];
 
     always_comb begin
-        r_out.valid = free_req & can_pop;
+        r_out.valid = can_pop; //free_req & can_pop;
         r_out.id    = uid_to_free;
 
         if (r_out.valid) begin
@@ -137,7 +137,7 @@ module response_memory #(
     end
 
     // free_ack now reflects "there is valid data" for this UID
-    assign free_ack = r_out.valid;
+    //assign free_ack = r_out.valid;
 
     // --------------------------------------------------------------------
     // SEQUENTIAL: commit writes and pops

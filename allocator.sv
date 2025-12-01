@@ -1,8 +1,8 @@
 module allocator #(
-    parameter int ID_WIDTH = 4,
+    parameter int ID_WIDTH = 16,
     parameter int MAX_OUTSTANDING = 16,
-    parameter int NUM_ROWS = $clog2(MAX_OUTSTANDING),
-    parameter int NUM_COLS = $clog2(MAX_OUTSTANDING)
+    parameter int NUM_ROWS = MAX_OUTSTANDING,
+    parameter int NUM_COLS = MAX_OUTSTANDING
 )(
     input  logic                 clk,
     input  logic                 rst, // synchronous active-high
