@@ -96,7 +96,7 @@ module response_memory #(
 
     always_comb begin
         r_in.ready = 1'b1;
-        if (r_in.valid && fifo_full[in_uid]) begin
+        if (r_in.valid & fifo_full[in_uid]) begin //ADAM SUGGESTION (bitwise & instead of &&)
             r_in.ready = 1'b0;
         end
     end
@@ -183,7 +183,7 @@ module response_memory #(
 
             // ---------------- POP PATH -------------------
             // Pop happens on real handshake: valid & ready
-            if (r_out.valid && r_out.ready) begin
+            if (r_out.valid & r_out.ready) begin //ADAM SUGGESTION (bitwise & instead of &&)
                 // Pop from FIFO[uid_to_free]
 
                 // Advance read pointer (wrap)
