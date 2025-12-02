@@ -159,10 +159,10 @@ module top_tb;
       // Handshake: one beat is actually transferred when valid & ready == 1
       if ((axi_r_out_if.valid & axi_r_out_if.ready) == 1'b1) begin
         // Print both hex and ASCII (for DATA_GILSTOLR we see text "GILSTOLR")
-        $display("[%0t] (scenario %0d) R ROB->MASTER: id=%0b data=%h (%s) last=%0b resp=%0b",
+        $display("[%0t] (scenario %0d) R ROB->MASTER: id=%0b data=%h last=%0b resp=%0b",
                  $time, scenario_id,
                  axi_r_out_if.id,
-                 axi_r_out_if.data, axi_r_out_if.data,
+                 axi_r_out_if.data,
                  axi_r_out_if.last,
                  axi_r_out_if.resp);
 
@@ -377,16 +377,16 @@ module top_tb;
       end
 
       if ((axi_r_in_if.valid & axi_r_in_if.ready) == 1'b0) begin
-        $error("[%0t] (scenario %0d) TIMEOUT: R SLAVE->ROB handshake FAILED (id=%0b data=%h (%s) last=%0b resp=%0b)",
+        $error("[%0t] (scenario %0d) TIMEOUT: R SLAVE->ROB handshake FAILED (id=%0b data=%h last=%0b resp=%0b)",
                $time, scenario_id,
-               id, data, data, last, resp);
+               id, data, last, resp);
         axi_r_in_if.valid = 1'b0;
         disable send_single_beat_rsp;
       end
 
-      $display("[%0t] (scenario %0d) R SLAVE->ROB: id=%0b data=%h (%s) last=%0b resp=%0b",
+      $display("[%0t] (scenario %0d) R SLAVE->ROB: id=%0b data=%h last=%0b resp=%0b",
                $time, scenario_id,
-               id, data, data, last, resp);
+               id, data, last, resp);
 
       axi_r_in_if.valid = 1'b0;
     end
@@ -431,16 +431,16 @@ module top_tb;
         end
 
         if ((axi_r_in_if.valid & axi_r_in_if.ready) == 1'b0) begin
-          $error("[%0t] (scenario %0d) TIMEOUT: R SLAVE->ROB handshake FAILED in burst (id=%0b data=%h (%s) beat=%0d last=%0b resp=%0b)",
+          $error("[%0t] (scenario %0d) TIMEOUT: R SLAVE->ROB handshake FAILED in burst (id=%0b data=%h beat=%0d last=%0b resp=%0b)",
                  $time, scenario_id,
-                 id, cur_data, cur_data, i, last, resp);
+                 id, cur_data, i, last, resp);
           axi_r_in_if.valid = 1'b0;
           disable send_burst_rsp;
         end
 
-        $display("[%0t] (scenario %0d) R SLAVE->ROB BURST: beat %0d id=%0b data=%h (%s) last=%0b resp=%0b",
+        $display("[%0t] (scenario %0d) R SLAVE->ROB BURST: beat %0d id=%0b data=%h last=%0b resp=%0b",
                  $time, scenario_id,
-                 i, id, cur_data, cur_data, last, resp);
+                 i, id, cur_data, last, resp);
 
         axi_r_in_if.valid = 1'b0;
       end
