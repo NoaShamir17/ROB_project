@@ -59,8 +59,10 @@ module r_ordering_unit #(
 
 
     // Decode uid
-    logic [ROW_W-1:0] resp_row = r_in.id[ROW_W+COL_W-1:COL_W];
-    logic [COL_W-1:0] resp_col = r_in.id[COL_W-1:0];
+    logic [ROW_W-1:0] resp_row;
+    logic [COL_W-1:0] resp_col;
+    assign resp_row = r_in.id[ROW_W+COL_W-1:COL_W];
+    assign resp_col = r_in.id[COL_W-1:0];
 
     // =========================================================================
     // Arbitration logic - direct or memory hit
