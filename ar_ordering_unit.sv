@@ -12,12 +12,15 @@
 //     occupied.
 // ============================================================================
 module ar_ordering_unit #(
-  parameter int ID_WIDTH    = 4,
-  parameter int ADDR_WIDTH  = 32,
+
+
+  parameter int ID_WIDTH    = 32,
+	parameter int ADDR_WIDTH  = 32,
   parameter int LEN_WIDTH   = 8,
   parameter int SIZE_WIDTH  = 3,
   parameter int BURST_WIDTH = 2,
-  parameter int QOS_WIDTH   = 4
+  parameter int QOS_WIDTH   = 4,
+	parameter int DEPTH       = 8      // number of AR entries stored
 )(
   input  logic clk,
   input  logic rst,

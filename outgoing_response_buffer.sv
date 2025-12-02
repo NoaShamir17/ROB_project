@@ -16,9 +16,9 @@
 // ============================================================================
 
 module outgoing_response_buffer #(
-  	parameter int ID_WIDTH        = 32;
-  	parameter int DATA_WIDTH      = 64;
-  	parameter int RESP_WIDTH      = 2;   // AXI RRESP width (OKAY/SLVERR/DECERR...)
+  	parameter int ID_WIDTH        = 32,
+  	parameter int DATA_WIDTH      = 64,
+  	parameter int RESP_WIDTH      = 2,   // AXI RRESP width (OKAY/SLVERR/DECERR...)
 	parameter int DEPTH       = 8
 )(
 	input  logic clk,
