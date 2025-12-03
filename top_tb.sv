@@ -158,7 +158,6 @@ module top_tb;
     if (rst == 1'b0) begin
       // Handshake: one beat is actually transferred when valid & ready == 1
       if ((axi_r_out_if.valid & axi_r_out_if.ready) == 1'b1) begin
-        // Print both hex and ASCII (for DATA_GILSTOLR we see text "GILSTOLR")
         $display("[%0t] (scenario %0d) R ROB->MASTER: id=%0b data=%h last=%0b resp=%0b",
                  $time, scenario_id,
                  axi_r_out_if.id,
@@ -286,16 +285,6 @@ module top_tb;
 
   // ---------------------------------------------------------------------------
   // AXI read address driver on master side (axi_ar_in_if)
-  //
-  // Usage:
-  //   • Drives all AR fields (id, addr, len, size, burst, qos).
-  //   • Asserts valid, waits for ready from ROB.
-  //   • Holds valid high across at least one full clock period, as required.
-  //   • After handshake completes, deasserts valid and then calls
-  //     capture_next_uid() to record the internal UID that the ROB sends out.
-  //
-  // Note: In this testbench, len is interpreted as "number of beats" directly
-  // (not AXI-style len+1). The rest of the design must be consistent with that.
   // ---------------------------------------------------------------------------
   task send_read_req(
     input logic [ID_WIDTH-1:0]    id,
@@ -307,6 +296,7 @@ module top_tb;
   );
     int guard;
     begin
+      #1
       // Drive all AR fields
       axi_ar_in_if.id    = id;
       axi_ar_in_if.addr  = addr;
@@ -329,6 +319,7 @@ module top_tb;
       if ((axi_ar_in_if.valid & axi_ar_in_if.ready) == 1'b0) begin
         $error("[%0t] (scenario %0d) TIMEOUT: AR MASTER->ROB handshake FAILED (id=%0b addr=%h len=%0d size=%0b burst=%0b qos=%0b)",
                $time, scenario_id, id, addr, len, size, burst, qos);
+        #1
         axi_ar_in_if.valid = 1'b0;
         disable send_read_req;
       end
@@ -337,6 +328,7 @@ module top_tb;
                $time, scenario_id, id, addr, len, size, burst, qos);
 
       // After handshake, deassert valid on the next cycle
+      #1
       axi_ar_in_if.valid = 1'b0;
 
       // Now wait for ROB to forward this AR and capture UID
@@ -346,12 +338,6 @@ module top_tb;
 
   // ---------------------------------------------------------------------------
   // AXI read data driver on slave side (axi_r_in_if) – single beat
-  //
-  // Usage:
-  //   • Called when we want to send exactly one data beat from "fabric" (slave)
-  //     into the ROB.
-  //   • We drive id (UID), data, resp, last, raise valid, then wait for ready.
-  //   • We keep valid high for at least one full cycle around posedge clk.
   // ---------------------------------------------------------------------------
   task send_single_beat_rsp(
     input logic [ID_WIDTH-1:0]   id,
@@ -361,6 +347,7 @@ module top_tb;
   );
     int guard;
     begin
+      #1
       axi_r_in_if.id    = id;
       axi_r_in_if.data  = data;
       axi_r_in_if.resp  = resp;
@@ -380,6 +367,7 @@ module top_tb;
         $error("[%0t] (scenario %0d) TIMEOUT: R SLAVE->ROB handshake FAILED (id=%0b data=%h last=%0b resp=%0b)",
                $time, scenario_id,
                id, data, last, resp);
+        #1
         axi_r_in_if.valid = 1'b0;
         disable send_single_beat_rsp;
       end
@@ -387,18 +375,13 @@ module top_tb;
       $display("[%0t] (scenario %0d) R SLAVE->ROB: id=%0b data=%h last=%0b resp=%0b",
                $time, scenario_id,
                id, data, last, resp);
-
+      #1
       axi_r_in_if.valid = 1'b0;
     end
   endtask
 
   // ---------------------------------------------------------------------------
   // AXI read data driver – multi-beat burst
-  //
-  // Usage:
-  //   • Sends 'beats' beats of data for a given UID.
-  //   • Each beat increments data by +k (cast to DATA_WIDTH).
-  //   • 'last' is asserted only on the final beat.
   // ---------------------------------------------------------------------------
   task send_burst_rsp(
     input logic [ID_WIDTH-1:0]   id,
@@ -411,6 +394,7 @@ module top_tb;
     logic [DATA_WIDTH-1:0] cur_data;
     logic                  last;
     begin
+      #1
       for (i = 0; i < beats; i = i + 1) begin
         cur_data = base_data + DATA_WIDTH'(i);
         last     = (i == (beats - 1));
@@ -434,6 +418,7 @@ module top_tb;
           $error("[%0t] (scenario %0d) TIMEOUT: R SLAVE->ROB handshake FAILED in burst (id=%0b data=%h beat=%0d last=%0b resp=%0b)",
                  $time, scenario_id,
                  id, cur_data, i, last, resp);
+          #1
           axi_r_in_if.valid = 1'b0;
           disable send_burst_rsp;
         end
@@ -441,7 +426,7 @@ module top_tb;
         $display("[%0t] (scenario %0d) R SLAVE->ROB BURST: beat %0d id=%0b data=%h last=%0b resp=%0b",
                  $time, scenario_id,
                  i, id, cur_data, last, resp);
-
+        #1
         axi_r_in_if.valid = 1'b0;
       end
     end
@@ -481,27 +466,6 @@ module top_tb;
 
   // ---------------------------------------------------------------------------
   // Direct test scenarios
-  //
-  // Scenario 1 – single read, in-order response
-  //   • One AR with id=0, len=1, size=8B, INCR, qos=0.
-  //   • Fabric returns one beat for that UID with data="GILSTOLR".
-  //   • Expectation: master sees exactly one beat (id=0, data="GILSTOLR", last=1).
-  //
-  // Scenario 2 – two different IDs, fabric returns responses swapped
-  //   • AR #0: id=3, len=1, data=1111....; AR #1: id=5, len=1, data=2222....
-  //   • Fabric returns UID1 (ID=5) first, then UID0 (ID=3).
-  //   • ROB is not required to reorder across different IDs, so master should
-  //     see ID 5 first, then ID 3.
-  //
-  // Scenario 3 – single ID, 4-beat burst, in-order fabric
-  //   • One AR with id=5, len=4.
-  //   • Fabric returns 4 beats in-order; ROB passes them through.
-  //
-  // Scenario 4 – response_memory stress (two 4-beat bursts, out-of-order)
-  //   • Two ARs with same id=7, each len=4.
-  //   • Fabric returns *second* burst first and *first* burst second.
-  //   • ROB should buffer correctly and emit all beats of first AR then all
-  //     beats of second AR.
   // ---------------------------------------------------------------------------
   initial begin : main_stimulus
     logic [DATA_WIDTH-1:0] base3;
