@@ -220,7 +220,7 @@ module top #(
 
     // incoming_response_buffer: AXI slave -> r_ordering_unit
     incoming_response_buffer #(
-        .ID_WIDTH    (ID_WIDTH),     // UID width on R channel
+        .ID_WIDTH    (ID_WIDTH),
         .DATA_WIDTH  (DATA_WIDTH),
         .RESP_WIDTH  (RESP_WIDTH),
         .DEPTH       (RESP_FIFO_DEPTH)
@@ -252,7 +252,7 @@ module top #(
 
 
         // Control: pop one beat for some UID
-        .uid_to_free (uid_to_restore)
+        .uid_to_free (rm_release_uid)
 
 
         // Pop handshake (combinational: valid & ready)

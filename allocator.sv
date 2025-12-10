@@ -170,7 +170,7 @@ module allocator #(
             if (used_count_current[free_row_idx] == PER_ROW_CNT_W'(1)) begin
                 row_is_bound_next[free_row_idx] = 1'b0;
                 bound_orig_id_next[free_row_idx] = '0;
-                available_col_next[free_row_idx] = '0;
+                //available_col_next[free_row_idx] = '0;
             end
         end
 

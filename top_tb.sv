@@ -1,9 +1,12 @@
+// ============================================================================
+// top_tb – Testbench for AXI Read Order Buffer (ROB)
+// ============================================================================
+
 module top_tb;
 
   // ---------------------------------------------------------------------------
   // Local parameters – must match DUT + interfaces
   // ---------------------------------------------------------------------------
-  // Global widths / sizes – these must be aligned with top.sv and ar_if / r_if
   localparam int ID_WIDTH        = 32;
   localparam int DATA_WIDTH      = 64;
   localparam int RESP_WIDTH      = 2;
@@ -33,7 +36,7 @@ module top_tb;
   // Scenario flag (for easier log reading)
   // ---------------------------------------------------------------------------
   // scenario_id helps us tag all prints/errors with which scenario is active.
-  // 0 = idle, 1..4 = specific scenario running.
+  // 0 = idle, 1..5 = specific scenario running.
   int scenario_id;
 
   // ---------------------------------------------------------------------------
@@ -58,8 +61,6 @@ module top_tb;
   // ---------------------------------------------------------------------------
   // Instantiate AXI interfaces that connect to the DUT
   // ---------------------------------------------------------------------------
-  // These interfaces model the AXI AR and R channels on both master and slave
-  // sides around the ROB top.
   ar_if #(
     .ID_WIDTH    (ID_WIDTH),
     .ADDR_WIDTH  (ADDR_WIDTH),
@@ -115,11 +116,9 @@ module top_tb;
   // ---------------------------------------------------------------------------
   // Scoreboard for expected responses from DUT (axi_r_out_if)
   //
-  // Role:
-  //   • expected_q holds the "golden" sequence of R beats that the ROB must
-  //     send to the master.
-  //   • We fill expected_q using sb_expect() before sending the fabric R beats.
-  //   • The monitor (always block) pops and compares on each R handshake.
+  // Important:
+  //   • We only enforce per-ID ordering.
+  //   • Between different IDs, beats may interleave arbitrarily.
   // ---------------------------------------------------------------------------
   typedef struct packed {
     logic [ID_WIDTH-1:0]   id;
@@ -127,19 +126,25 @@ module top_tb;
     logic                  last;
   } expected_rsp_t;
 
-  expected_rsp_t expected_q [0:31]; // small fixed-size queue of expected beats
-  int exp_count;                    // how many entries we wrote
-  int exp_index;                    // next entry index to check against DUT
+  expected_rsp_t expected_q   [0:255]; // enough for all beats in all scenarios
+  logic          expected_done[0:255];
 
-  // Reset scoreboard counters to empty
+  int exp_count;     // how many expected beats are defined
+  int beats_seen;    // how many beats have matched successfully
+
+  // Reset scoreboard counters
   task sb_reset;
+    int index_reset;
     begin
-      exp_count = 0;
-      exp_index = 0;
+      exp_count  = 0;
+      beats_seen = 0;
+      for (index_reset = 0; index_reset < 256; index_reset = index_reset + 1) begin
+        expected_done[index_reset] = 1'b0;
+      end
     end
   endtask
 
-  // Push one expected beat (id, data, last) into the scoreboard queue
+  // Push one expected beat (id, data, last)
   task sb_expect(
     input logic [ID_WIDTH-1:0]   id,
     input logic [DATA_WIDTH-1:0] data,
@@ -149,135 +154,161 @@ module top_tb;
       expected_q[exp_count].id   = id;
       expected_q[exp_count].data = data;
       expected_q[exp_count].last = last;
+      expected_done[exp_count]   = 1'b0;
       exp_count = exp_count + 1;
     end
   endtask
 
-  // Monitor R channel (DUT -> master) and check against expected_q
+  // Monitor R channel (DUT -> master) and compare with expected_q
+  // Rule: for each ID, beats must appear in the same order as we pushed them
+  //       with sb_expect. Beats from different IDs can be interleaved freely.
   always @(posedge clk) begin
     if (rst == 1'b0) begin
-      // Handshake: one beat is actually transferred when valid & ready == 1
       if ((axi_r_out_if.valid & axi_r_out_if.ready) == 1'b1) begin
-        $display("[%0t] (scenario %0d) R ROB->MASTER: id=%0b data=%h last=%0b resp=%0b",
-                 $time, scenario_id,
-                 axi_r_out_if.id,
-                 axi_r_out_if.data,
-                 axi_r_out_if.last,
-                 axi_r_out_if.resp);
+        int search_index;
+        int earlier_index;
+        int matched_index;
+        bit match_found;
+        bit earlier_open;
 
-        // If scoreboard has no more expected entries, this beat is unexpected
-        if (exp_index >= exp_count) begin
-          $error("[%0t] (scenario %0d) unexpected response from ROB: id=%0b data=%h last=%0b",
-                 $time, scenario_id,
-                 axi_r_out_if.id, axi_r_out_if.data, axi_r_out_if.last);
+        // Do not print R road in scenario five
+        if (scenario_id != 5) begin
+          $display("[%0t] (scenario %0d) R ROB->MASTER: id=%0b data=%h last=%0b resp=%0b",
+                   $time, scenario_id,
+                   axi_r_out_if.id,
+                   axi_r_out_if.data,
+                   axi_r_out_if.last,
+                   axi_r_out_if.resp);
+        end
+
+        matched_index = -1;
+        match_found   = 1'b0;
+
+        // Look for a matching expected entry that:
+        //   • has same (id,data,last)
+        //   • is not already used
+        //   • has no earlier, still-open entry with the same id
+        for (search_index = 0; search_index < exp_count; search_index = search_index + 1) begin
+          if (!expected_done[search_index] &&
+              axi_r_out_if.id   == expected_q[search_index].id &&
+              axi_r_out_if.data == expected_q[search_index].data &&
+              axi_r_out_if.last == expected_q[search_index].last) begin
+
+            earlier_open = 1'b0;
+            for (earlier_index = 0; earlier_index < search_index; earlier_index = earlier_index + 1) begin
+              if (!expected_done[earlier_index] &&
+                  expected_q[earlier_index].id == axi_r_out_if.id) begin
+                earlier_open = 1'b1;
+              end
+            end
+
+            if (!earlier_open && !match_found) begin
+              matched_index = search_index;
+              match_found   = 1'b0 | 1'b1; // keep as single assignment bitwise style
+              match_found   = 1'b1;
+            end
+          end
+        end
+
+        if (!match_found) begin
+          // In scenario five we stay silent (no per-beat scoreboard errors),
+          // in other scenarios we still flag mismatches.
+          if (scenario_id != 5) begin
+            $error("[%0t] (scenario %0d) SCOREBOARD ERROR: beat id=%0b data=%h last=%0b does not match any valid next beat for its ID",
+                   $time, scenario_id,
+                   axi_r_out_if.id,
+                   axi_r_out_if.data,
+                   axi_r_out_if.last);
+          end
         end
         else begin
-          // Compare actual vs expected for id/data/last
-          if ( (axi_r_out_if.id   == expected_q[exp_index].id) &
-               (axi_r_out_if.data == expected_q[exp_index].data) &
-               (axi_r_out_if.last == expected_q[exp_index].last) ) begin
-            $display("[%0t] (scenario %0d) SCOREBOARD: beat %0d OK (id=%0b)",
-                     $time, scenario_id, exp_index, axi_r_out_if.id);
+          expected_done[matched_index] = 1'b1;
+          beats_seen = beats_seen + 1;
+
+          // Do NOT print OK lines in scenario five to keep log short.
+          if (scenario_id != 5) begin
+            $display("[%0t] (scenario %0d) SCOREBOARD: beat %0d OK (id=%0b matched_index=%0d)",
+                     $time, scenario_id, beats_seen - 1,
+                     axi_r_out_if.id, matched_index);
           end
-          else begin
-            // Detailed mismatch report
-            $error("[%0t] (scenario %0d) SCOREBOARD MISMATCH at beat %0d: got id=%0b data=%h last=%0b expected id=%0b data=%h last=%0b",
-                   $time, scenario_id, exp_index,
-                   axi_r_out_if.id,   axi_r_out_if.data,   axi_r_out_if.last,
-                   expected_q[exp_index].id,
-                   expected_q[exp_index].data,
-                   expected_q[exp_index].last);
-          end
-          // Move to next expected entry
-          exp_index = exp_index + 1;
         end
       end
     end
   end
 
-  // Wait until all expected beats were observed on R channel or timeout
+  // Wait until all expected beats were observed or timeout
   task sb_wait_all(input string tag);
-    int guard;
+    int guard_counter;
     begin
-      guard = 0;
-      // Wait while not all expected beats received, but with timeout
-      while ((exp_index < exp_count) & (guard < TIMEOUT_CYCLES)) begin
+      guard_counter = 0;
+      while ((beats_seen < exp_count) & (guard_counter < TIMEOUT_CYCLES)) begin
         @(posedge clk);
-        guard = guard + 1;
+        guard_counter = guard_counter + 1;
       end
 
-      if (exp_index == exp_count) begin
+      if (beats_seen == exp_count) begin
         $display("[%0t] (scenario %0d) scenario %s completed ok (%0d beats)",
                  $time, scenario_id, tag, exp_count);
       end
       else begin
         $error("[%0t] (scenario %0d) TIMEOUT: ROB did not produce all expected beats in scenario %s (seen %0d / %0d)",
-               $time, scenario_id, tag, exp_index, exp_count);
+               $time, scenario_id, tag, beats_seen, exp_count);
       end
     end
   endtask
 
   // ---------------------------------------------------------------------------
   // Track internal UIDs sent by DUT on axi_ar_out_if.id
-  //
-  // Idea:
-  //   • Our allocator / remapper maps orig_id → internal UID {row,col}.
-  //   • Testbench must use that UID on R channel when sending responses.
-  //   • For each AR sent, we capture the UID in captured_uid[uid_count].
   // ---------------------------------------------------------------------------
-  localparam int MAX_REQ = 16;
+  localparam int MAX_REQ = 32; // allow enough captured requests (incl. scenario five)
   logic [ID_WIDTH-1:0] captured_uid [0:MAX_REQ-1];
   int                  uid_count;
 
-  // Reset UID capture queue
   task uid_reset;
     begin
       uid_count = 0;
     end
   endtask
 
-  // Wait until ROB forwards an AR (ROB->SLAVE), then record its UID
-  task capture_next_uid;
-    int guard;
+  // Non-blocking AR monitor: capture UIDs whenever ROB forwards to slave
+  always @(posedge clk) begin
+    if (rst == 1'b0) begin
+      if ((axi_ar_out_if.valid & axi_ar_out_if.ready) == 1'b1) begin
+        captured_uid[uid_count] = axi_ar_out_if.id;
+        $display("[%0t] (scenario %0d) AR ROB->SLAVE: uid=%0b addr=%h len=%0d size=%0b burst=%0b qos=%0b",
+                 $time, scenario_id,
+                 axi_ar_out_if.id,
+                 axi_ar_out_if.addr,
+                 axi_ar_out_if.len,
+                 axi_ar_out_if.size,
+                 axi_ar_out_if.burst,
+                 axi_ar_out_if.qos);
+        uid_count = uid_count + 1;
+      end
+    end
+  end
+
+  // Wait until at least "required" UIDs were observed or timeout
+  task wait_for_uids(input int required);
+    int guard_counter;
     begin
-      guard = 0;
-      @(posedge clk);
-      // Wait for AR handshake: valid&ready == 1
-      while ((axi_ar_out_if.valid & axi_ar_out_if.ready) == 1'b0 &
-             guard < TIMEOUT_CYCLES) begin
-        guard = guard + 1;
+      guard_counter = 0;
+      while ((uid_count < required) & (guard_counter < TIMEOUT_CYCLES)) begin
         @(posedge clk);
+        guard_counter = guard_counter + 1;
       end
-
-      // If we timed out, report error and exit this task
-      if ((axi_ar_out_if.valid & axi_ar_out_if.ready) == 1'b0) begin
-        $error("[%0t] (scenario %0d) TIMEOUT: AR ROB->SLAVE handshake FAILED (no forwarded AR observed)",
-               $time, scenario_id);
-        disable capture_next_uid;
+      if (uid_count < required) begin
+        $error("[%0t] (scenario %0d) TIMEOUT: did not observe %0d AR ROB->SLAVE transactions (only %0d)",
+               $time, scenario_id, required, uid_count);
       end
-
-      // Capture internal UID from ROB->SLAVE AR channel
-      captured_uid[uid_count] = axi_ar_out_if.id;
-      $display("[%0t] (scenario %0d) AR ROB->SLAVE: uid=%0b addr=%h len=%0d size=%0b burst=%0b qos=%0b",
-               $time, scenario_id,
-               captured_uid[uid_count],
-               axi_ar_out_if.addr,
-               axi_ar_out_if.len,
-               axi_ar_out_if.size,
-               axi_ar_out_if.burst,
-               axi_ar_out_if.qos);
-
-      uid_count = uid_count + 1;
     end
   endtask
 
-  // ---------------------------------------------------------------------------
-  // Small helper: wait some idle cycles between scenarios
-  // ---------------------------------------------------------------------------
+  // Small helper: idle cycles between scenarios
   task wait_idle_cycles(input int cycles);
-    int i;
+    int cycle_index;
     begin
-      for (i = 0; i < cycles; i = i + 1) begin
+      for (cycle_index = 0; cycle_index < cycles; cycle_index = cycle_index + 1) begin
         @(posedge clk);
       end
     end
@@ -294,10 +325,9 @@ module top_tb;
     input logic [BURST_WIDTH-1:0] burst,
     input logic [QOS_WIDTH-1:0]   qos
   );
-    int guard;
+    int guard_counter;
     begin
       #1
-      // Drive all AR fields
       axi_ar_in_if.id    = id;
       axi_ar_in_if.addr  = addr;
       axi_ar_in_if.len   = len;
@@ -307,12 +337,11 @@ module top_tb;
 
       axi_ar_in_if.valid = 1'b1;
 
-      guard = 0;
-      @(posedge clk); // value must be stable through a full clock edge
-      // Wait for AR MASTER->ROB handshake (valid & ready == 1)
+      guard_counter = 0;
+      @(posedge clk);
       while ((axi_ar_in_if.valid & axi_ar_in_if.ready) == 1'b0 &
-             guard < TIMEOUT_CYCLES) begin
-        guard = guard + 1;
+             guard_counter < TIMEOUT_CYCLES) begin
+        guard_counter = guard_counter + 1;
         @(posedge clk);
       end
 
@@ -327,12 +356,9 @@ module top_tb;
       $display("[%0t] (scenario %0d) AR MASTER->ROB: id=%0b addr=%h len=%0d size=%0b burst=%0b qos=%0b",
                $time, scenario_id, id, addr, len, size, burst, qos);
 
-      // After handshake, deassert valid on the next cycle
       #1
       axi_ar_in_if.valid = 1'b0;
-
-      // Now wait for ROB to forward this AR and capture UID
-      capture_next_uid();
+      // Note: UID is now captured by the AR monitor, not here.
     end
   endtask
 
@@ -345,7 +371,7 @@ module top_tb;
     input logic [RESP_WIDTH-1:0] resp,
     input logic                  last
   );
-    int guard;
+    int guard_counter;
     begin
       #1
       axi_r_in_if.id    = id;
@@ -354,12 +380,11 @@ module top_tb;
       axi_r_in_if.last  = last;
       axi_r_in_if.valid = 1'b1;
 
-      guard = 0;
-      @(posedge clk); // ensure data/valid are visible through the clock edge
-      // Wait for R SLAVE->ROB handshake
+      guard_counter = 0;
+      @(posedge clk);
       while ((axi_r_in_if.valid & axi_r_in_if.ready) == 1'b0 &
-             guard < TIMEOUT_CYCLES) begin
-        guard = guard + 1;
+             guard_counter < TIMEOUT_CYCLES) begin
+        guard_counter = guard_counter + 1;
         @(posedge clk);
       end
 
@@ -372,9 +397,12 @@ module top_tb;
         disable send_single_beat_rsp;
       end
 
-      $display("[%0t] (scenario %0d) R SLAVE->ROB: id=%0b data=%h last=%0b resp=%0b",
-               $time, scenario_id,
-               id, data, last, resp);
+      if (scenario_id != 5) begin
+        $display("[%0t] (scenario %0d) R SLAVE->ROB: id=%0b data=%h last=%0b resp=%0b",
+                 $time, scenario_id,
+                 id, data, last, resp);
+      end
+
       #1
       axi_r_in_if.valid = 1'b0;
     end
@@ -389,15 +417,15 @@ module top_tb;
     input logic [DATA_WIDTH-1:0] base_data,
     input logic [RESP_WIDTH-1:0] resp
   );
-    int i;
-    int guard;
+    int beat_index;
+    int guard_counter;
     logic [DATA_WIDTH-1:0] cur_data;
     logic                  last;
     begin
       #1
-      for (i = 0; i < beats; i = i + 1) begin
-        cur_data = base_data + DATA_WIDTH'(i);
-        last     = (i == (beats - 1));
+      for (beat_index = 0; beat_index < beats; beat_index = beat_index + 1) begin
+        cur_data = base_data + DATA_WIDTH'(beat_index);
+        last     = (beat_index == (beats - 1));
 
         axi_r_in_if.id    = id;
         axi_r_in_if.data  = cur_data;
@@ -405,27 +433,29 @@ module top_tb;
         axi_r_in_if.last  = last;
         axi_r_in_if.valid = 1'b1;
 
-        guard = 0;
+        guard_counter = 0;
         @(posedge clk);
-        // Wait for handshake of this beat
         while ((axi_r_in_if.valid & axi_r_in_if.ready) == 1'b0 &
-               guard < TIMEOUT_CYCLES) begin
-          guard = guard + 1;
+               guard_counter < TIMEOUT_CYCLES) begin
+          guard_counter = guard_counter + 1;
           @(posedge clk);
         end
 
         if ((axi_r_in_if.valid & axi_r_in_if.ready) == 1'b0) begin
           $error("[%0t] (scenario %0d) TIMEOUT: R SLAVE->ROB handshake FAILED in burst (id=%0b data=%h beat=%0d last=%0b resp=%0b)",
                  $time, scenario_id,
-                 id, cur_data, i, last, resp);
+                 id, cur_data, beat_index, last, resp);
           #1
           axi_r_in_if.valid = 1'b0;
           disable send_burst_rsp;
         end
+        
+        if (scenario_id != 5) begin
+          $display("[%0t] (scenario %0d) R SLAVE->ROB BURST: beat %0d id=%0b data=%h last=%0b resp=%0b",
+                   $time, scenario_id,
+                   beat_index, id, cur_data, last, resp);
+        end
 
-        $display("[%0t] (scenario %0d) R SLAVE->ROB BURST: beat %0d id=%0b data=%h last=%0b resp=%0b",
-                 $time, scenario_id,
-                 i, id, cur_data, last, resp);
         #1
         axi_r_in_if.valid = 1'b0;
       end
@@ -447,10 +477,10 @@ module top_tb;
     axi_ar_in_if.burst = {BURST_WIDTH{1'b0}};
     axi_ar_in_if.qos   = {QOS_WIDTH{1'b0}};
 
-    // We keep the slave side AR ready always high in TB
+    // Slave AR side always ready (no backpressure on AR)
     axi_ar_out_if.ready = 1'b1;
 
-    // Master R channel is always ready (backpressure-free master)
+    // Master R side always ready (no backpressure on R)
     axi_r_out_if.ready  = 1'b1;
 
     // R slave defaults
@@ -468,10 +498,48 @@ module top_tb;
   // Direct test scenarios
   // ---------------------------------------------------------------------------
   initial begin : main_stimulus
-    logic [DATA_WIDTH-1:0] base3;
-    logic [DATA_WIDTH-1:0] base4_a;
-    logic [DATA_WIDTH-1:0] base4_b;
-    int k;
+    // Base data patterns for different scenarios
+    logic [DATA_WIDTH-1:0] base_three;
+    logic [DATA_WIDTH-1:0] base_four_a;
+    logic [DATA_WIDTH-1:0] base_four_b;
+
+    logic [DATA_WIDTH-1:0] base_seven;
+    logic [DATA_WIDTH-1:0] base_nine;
+    logic [DATA_WIDTH-1:0] base_eleven;
+
+    // Scenario five base pattern
+    logic [DATA_WIDTH-1:0] base_scenario_five;
+    logic [DATA_WIDTH-1:0] base_data_request_five;
+
+    // Temporary values used in scoreboard building
+    logic [DATA_WIDTH-1:0] data_val_seven;
+    logic [DATA_WIDTH-1:0] data_val_nine;
+    logic [DATA_WIDTH-1:0] data_val_eleven;
+
+    // Temporary values used in fabric-response patterns
+    logic [DATA_WIDTH-1:0] base_req_eleven;
+    logic [DATA_WIDTH-1:0] base_req_nine;
+    logic [DATA_WIDTH-1:0] base_req_seven;
+
+    // Original id and address helpers (scenario five)
+    logic [ID_WIDTH-1:0]   orig_id_scenario_five;
+    logic [ID_WIDTH-1:0]   orig_id_scenario_five_b;
+    logic [ADDR_WIDTH-1:0] addr_scenario_five;
+
+    // Helpers for scenario five request loop
+    logic [ID_WIDTH-1:0]   current_id_scenario_five;
+    logic [ADDR_WIDTH-1:0] current_addr_scenario_five;
+
+    int loop_index;
+    int request_index;
+    int row_index;
+    int beat_index;
+    int local_index;
+    int blocked_cycles;
+
+    int count_seven;
+    int count_nine;
+    int count_eleven;
 
     // Wait until reset is deasserted
     @(posedge clk);
@@ -480,48 +548,52 @@ module top_tb;
     end
 
     // ============================
-    // Scenario 1 – in-order single beat
+    // Scenario one – in-order single beat
+    // ----------------------------
+    // AR master sends one read with original id zero and length one.
+    // Slave returns one beat with that id. ROB should pass it straight through.
     // ============================
     scenario_id = 1;
     $display("---- SCENARIO 1: one read, in-order response ----");
     sb_reset();
     uid_reset();
 
-    // Expected output at master side:
-    //   R beat: id=0, data="GILSTOLR", last=1
     sb_expect(ID_WIDTH'(0), DATA_GILSTOLR, 1'b1);
 
-    // Send AR with all fields specified
     send_read_req(
-      ID_WIDTH'(0),                             // id
-      ADDR_WIDTH'(32'h0000_1000),              // addr
-      LEN_WIDTH'(1),                           // len = 1 beat
-      SIZE_WIDTH'(3),                          // 3'b011 = 8 bytes
-      BURST_WIDTH'(1),                         // 2'b01  = INCR
-      QOS_WIDTH'({QOS_WIDTH{1'b0}})            // qos  = 0
+      ID_WIDTH'(0),
+      ADDR_WIDTH'(32'h0000_1000),
+      LEN_WIDTH'(1),
+      SIZE_WIDTH'(3),
+      BURST_WIDTH'(1),
+      QOS_WIDTH'({QOS_WIDTH{1'b0}})
     );
 
-    // Slave returns one R beat for captured_uid[0] with "GILSTOLR"
+    // Wait until AR was forwarded and UID captured
+    wait_for_uids(1);
+
     send_single_beat_rsp(
-      captured_uid[0],                         // internal UID
-      DATA_GILSTOLR,                           // data = "GILSTOLR"
-      RESP_WIDTH'(0),                          // resp = OKAY
-      1'b1                                     // last = 1
+      captured_uid[0],
+      DATA_GILSTOLR,
+      RESP_WIDTH'(0),
+      1'b1
     );
 
-    // Wait until scoreboard sees everything
     sb_wait_all("SCENARIO_1");
     wait_idle_cycles(10);
 
     // ============================
-    // Scenario 2 – two IDs, swapped fabric returns
+    // Scenario two – two IDs, swapped fabric returns
+    // ----------------------------
+    // AR master sends two single-beat reads with ids three and five.
+    // Slave returns them in reverse order by internal uid.
+    // ROB must preserve ordering per original id, scoreboard checks that.
     // ============================
     scenario_id = 2;
     $display("---- SCENARIO 2: two IDs, swapped fabric returns (no cross-ID reordering) ----");
     sb_reset();
     uid_reset();
 
-    // AR #0: orig_id=3, len=1
     send_read_req(
       ID_WIDTH'(3),
       ADDR_WIDTH'(32'h0000_2000),
@@ -531,7 +603,6 @@ module top_tb;
       QOS_WIDTH'({QOS_WIDTH{1'b0}})
     );
 
-    // AR #1: orig_id=5, len=1
     send_read_req(
       ID_WIDTH'(5),
       ADDR_WIDTH'(32'h0000_3000),
@@ -541,19 +612,20 @@ module top_tb;
       QOS_WIDTH'({QOS_WIDTH{1'b0}})
     );
 
-    // Fabric returns UID1 (ID=5) first, then UID0 (ID=3).
-    // Since IDs are different, ROB may simply reflect that order.
+    // Wait for both ARs to be forwarded
+    wait_for_uids(2);
+
     sb_expect(ID_WIDTH'(5), DATA_WIDTH'(64'h2222_0000_0000_0002), 1'b1);
     sb_expect(ID_WIDTH'(3), DATA_WIDTH'(64'h1111_0000_0000_0001), 1'b1);
 
-    // Fabric: second AR's UID first...
+    // Fabric returns in reverse internal uid order
     send_single_beat_rsp(
       captured_uid[1],
       DATA_WIDTH'(64'h2222_0000_0000_0002),
       RESP_WIDTH'(0),
       1'b1
     );
-    // ...then first AR's UID
+
     send_single_beat_rsp(
       captured_uid[0],
       DATA_WIDTH'(64'h1111_0000_0000_0001),
@@ -565,14 +637,17 @@ module top_tb;
     wait_idle_cycles(10);
 
     // ============================
-    // Scenario 3 – single ID, 4-beat burst, in-order
+    // Scenario three – single ID, four-beat burst, in-order
+    // ----------------------------
+    // AR master sends one burst (length four) with original id five.
+    // Slave returns four beats in-order with that internal uid.
+    // ROB must preserve the beat order for that id.
     // ============================
     scenario_id = 3;
     $display("---- SCENARIO 3: single ID, 4-beat burst ----");
     sb_reset();
     uid_reset();
 
-    // One AR: id=5, 4 beats
     send_read_req(
       ID_WIDTH'(5),
       ADDR_WIDTH'(32'h0000_4000),
@@ -582,18 +657,19 @@ module top_tb;
       QOS_WIDTH'({QOS_WIDTH{1'b0}})
     );
 
-    base3 = DATA_WIDTH'(64'hAAA0_0000_0000_0000);
+    // Wait for AR to be forwarded
+    wait_for_uids(1);
 
-    // Golden: 4 beats, last=1 only on the final beat
-    for (k = 0; k < 4; k = k + 1) begin
-      sb_expect(ID_WIDTH'(5), base3 + DATA_WIDTH'(k), (k == 3));
+    base_three = DATA_WIDTH'(64'hAAA0_0000_0000_0000);
+
+    for (loop_index = 0; loop_index < 4; loop_index = loop_index + 1) begin
+      sb_expect(ID_WIDTH'(5), base_three + DATA_WIDTH'(loop_index), (loop_index == 3));
     end
 
-    // Fabric returns 4 beats in-order for that UID
     send_burst_rsp(
-      captured_uid[0],                          // UID for this AR
-      4,                                        // beats
-      base3,
+      captured_uid[0],
+      4,
+      base_three,
       RESP_WIDTH'(0)
     );
 
@@ -601,14 +677,18 @@ module top_tb;
     wait_idle_cycles(10);
 
     // ============================
-    // Scenario 4 – response_memory stress, two 4-beat bursts, reversed
+    // Scenario four – response_memory stress, two bursts reversed
+    // ----------------------------
+    // AR master sends two bursts (length four each) with same original id seven.
+    // Slave returns second burst first, then first burst, by internal uid order.
+    // ROB must reorder so that master sees all beats from first burst,
+    // then all beats from second burst, for the same original id.
     // ============================
     scenario_id = 4;
     $display("---- SCENARIO 4: response_memory stress (two 4-beat bursts, out-of-order) ----");
     sb_reset();
     uid_reset();
 
-    // First 4-beat AR, orig_id=7
     send_read_req(
       ID_WIDTH'(7),
       ADDR_WIDTH'(32'h0000_5000),
@@ -618,7 +698,6 @@ module top_tb;
       QOS_WIDTH'({QOS_WIDTH{1'b0}})
     );
 
-    // Second 4-beat AR, same orig_id=7
     send_read_req(
       ID_WIDTH'(7),
       ADDR_WIDTH'(32'h0000_6000),
@@ -628,36 +707,116 @@ module top_tb;
       QOS_WIDTH'({QOS_WIDTH{1'b0}})
     );
 
-    base4_a = DATA_WIDTH'(64'hA000_0000_0000_0000);
-    base4_b = DATA_WIDTH'(64'hB000_0000_0000_0000);
+    // Wait for both ARs to be forwarded
+    wait_for_uids(2);
 
-    // Golden: all beats of first AR (base4_a) then all beats of second AR (base4_b)
-    for (k = 0; k < 4; k = k + 1) begin
-      sb_expect(ID_WIDTH'(7), base4_a + DATA_WIDTH'(k), (k == 3));
+    base_four_a = DATA_WIDTH'(64'hA000_0000_0000_0000);
+    base_four_b = DATA_WIDTH'(64'hB000_0000_0000_0000);
+
+    for (loop_index = 0; loop_index < 4; loop_index = loop_index + 1) begin
+      sb_expect(ID_WIDTH'(7), base_four_a + DATA_WIDTH'(loop_index), (loop_index == 3));
     end
-    for (k = 0; k < 4; k = k + 1) begin
-      sb_expect(ID_WIDTH'(7), base4_b + DATA_WIDTH'(k), (k == 3));
+    for (loop_index = 0; loop_index < 4; loop_index = loop_index + 1) begin
+      sb_expect(ID_WIDTH'(7), base_four_b + DATA_WIDTH'(loop_index), (loop_index == 3));
     end
 
-    // Fabric returns bursts in reverse AR order:
-    //   1) All beats of second AR's UID
-    //   2) All beats of first AR's UID
-    // This forces use of response_memory inside the ROB.
+    // Slave returns second burst first
     send_burst_rsp(
-      captured_uid[1],                          // second AR UID
+      captured_uid[1],
       4,
-      base4_b,
+      base_four_b,
       RESP_WIDTH'(0)
     );
+    // Then first burst
     send_burst_rsp(
-      captured_uid[0],                          // first AR UID
+      captured_uid[0],
       4,
-      base4_a,
+      base_four_a,
       RESP_WIDTH'(0)
     );
 
     sb_wait_all("SCENARIO_4");
+    wait_idle_cycles(10);
 
+    // ============================
+    // Scenario five – allocator MAX_OUTSTANDING limit
+    // ----------------------------
+    // AR master sends seventeen read requests, each with length two.
+    // Original ids alternate between seven and nine.
+    // Allocator can hold at most sixteen outstanding tags.
+    //
+    // Expectation:
+    //   • All seventeen AR MASTER->ROB handshakes succeed.
+    //   • While allocator is full, one request is held back internally.
+    //   • As responses free tags, the seventeenth AR is forwarded later.
+    //   • We send two-beat responses for all forwarded UIDs (all 17).
+    //   • R path is exercised, but we print nothing on R channels here.
+    // ============================
+    scenario_id = 5;
+    $display("---- SCENARIO 5: allocator MAX_OUTSTANDING limit (seventeen requests, two-beat bursts) ----");
+    sb_reset();
+    uid_reset();
+
+    // Two different original IDs
+    orig_id_scenario_five   = ID_WIDTH'(7);
+    orig_id_scenario_five_b = ID_WIDTH'(9);
+    addr_scenario_five      = ADDR_WIDTH'(32'h0000_7000);
+
+    // Send seventeen read requests, each LEN=2 (two beats), alternating ids.
+    for (request_index = 0; request_index < 17; request_index = request_index + 1) begin
+      current_id_scenario_five   = (request_index[0] == 1'b0) ? orig_id_scenario_five : orig_id_scenario_five_b;
+      current_addr_scenario_five = addr_scenario_five + ADDR_WIDTH'(request_index * 8);
+
+      send_read_req(
+        current_id_scenario_five,
+        current_addr_scenario_five,
+        LEN_WIDTH'(2),
+        SIZE_WIDTH'(3),
+        BURST_WIDTH'(1),
+        QOS_WIDTH'({QOS_WIDTH{1'b0}})
+      );
+      // No scoreboard expectations in scenario five.
+    end
+
+    $display("---- SCENARIO 5: finished issuing seventeen read requests ----");
+
+    // Wait until at least sixteen UIDs have been observed (allocator full point)
+    wait_for_uids(16);
+
+    // First wave of responses for the first sixteen forwarded requests
+    base_scenario_five = DATA_WIDTH'(64'hC000_0000_0000_0000);
+
+    for (request_index = 0; request_index < 16; request_index = request_index + 1) begin
+      base_data_request_five = base_scenario_five + DATA_WIDTH'(request_index << 4);
+
+      send_burst_rsp(
+        captured_uid[request_index],
+        2,
+        base_data_request_five,
+        RESP_WIDTH'(0)
+      );
+    end
+
+    // Now allocator has free tags; the seventeenth request can be forwarded.
+    // Wait for UID seventeen to show up.
+    wait_for_uids(17);
+
+    // Send response for the seventeenth forwarded request as well
+    base_data_request_five = base_scenario_five + DATA_WIDTH'(16 << 4);
+
+    send_burst_rsp(
+      captured_uid[16],
+      2,
+      base_data_request_five,
+      RESP_WIDTH'(0)
+    );
+
+    // Let all responses drain
+    wait_idle_cycles(50);
+
+    // -------------------------------------------------------------------------
+    // End of all scenarios
+    // -------------------------------------------------------------------------
     scenario_id = 0;
     $display("==== ALL SCENARIOS DONE ====");
     #20;

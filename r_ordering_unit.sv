@@ -59,8 +59,10 @@ module r_ordering_unit #(
 
 
     // Decode uid
-    logic [ROW_W-1:0] resp_row = r_in.id[ROW_W+COL_W-1:COL_W];
-    logic [COL_W-1:0] resp_col = r_in.id[COL_W-1:0];
+    logic [ROW_W-1:0] resp_row;
+    logic [COL_W-1:0] resp_col;
+    assign resp_row = r_in.id[ROW_W+COL_W-1:COL_W];
+    assign resp_col = r_in.id[COL_W-1:0];
 
     // =========================================================================
     // Arbitration logic - direct or memory hit
@@ -115,8 +117,11 @@ module r_ordering_unit #(
     end
 
     assign rm_hit = |rm_hit_vec;
-    logic [ROW_W-1:0] rm_row = rm_hit_uid[ROW_W+COL_W-1:COL_W];
-    logic [COL_W-1:0] rm_col = rm_hit_uid[COL_W-1:0];
+    logic [ROW_W-1:0] rm_row;
+    logic [COL_W-1:0] rm_col;
+
+    assign rm_row = rm_hit_uid[ROW_W+COL_W-1:COL_W];
+    assign rm_col = rm_hit_uid[COL_W-1:0];
                    
 
     // =========================================================================
@@ -124,10 +129,15 @@ module r_ordering_unit #(
     // =========================================================================
 
     //-----handshake signals-----
-    logic hs_in      = r_in.valid & r_in.ready;
-    logic hs_out     = r_out.valid & r_out.ready;
-    logic hs_store   = r_store.valid & r_store.ready;
-    logic hs_release = r_release.valid & r_release.ready;
+    logic hs_in;
+    logic hs_out;
+    logic hs_store;
+    logic hs_release;
+
+    assign hs_in      = r_in.valid & r_in.ready;
+    assign hs_out     = r_out.valid & r_out.ready;
+    assign hs_store   = r_store.valid & r_store.ready;
+    assign hs_release = r_release.valid & r_release.ready;
 
     //-----allocator free request-----
     assign allocator_free_req = hs_out & r_out.last; // free when last beat is sent out
@@ -219,13 +229,15 @@ module r_ordering_unit #(
         end else begin
             if (hs_out) begin
                 //handshake on output - update pointers and waiting map
-                if (direct_hit & hs_in) begin
+                if (direct_hit & hs_in & r_out.last) begin
                     // Increment release pointer for that row
                     release_idx[resp_row] <= release_idx[resp_row] + 1'b1;
                 end
                 else if (rm_hit & hs_release) begin
                     // Increment release pointer for that row
-                    release_idx[rm_row] <= release_idx[rm_row] + 1'b1;
+		    if (r_out.last)begin
+                    	release_idx[rm_row] <= release_idx[rm_row] + 1'b1;
+		    end
                     // Decrement waiting beats count for that entry
                     if (|waiting_beats_count[rm_row][rm_col]) begin          //ADAM SUGGESTION 
                         waiting_beats_count[rm_row][rm_col]                  //ADAM SUGGESTION 
